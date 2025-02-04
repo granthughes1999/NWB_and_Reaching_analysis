@@ -1,4 +1,5 @@
 Date: 02-04-2025
+
 order of main files to run
 
 1. event_plots.ipynb --> allows you to make plots to see if Tones, optical pulses, and all events are correctly aligned. uses digital inputs from open-ephys to create plots
