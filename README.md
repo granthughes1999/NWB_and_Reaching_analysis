@@ -22,6 +22,7 @@ Extra Code Packages
 
 -----------------------------------------------
 order of files to run to just make a general NWB
+You need to go into the general_nwb_creation folder, then use and modify these two files
 
 1. pre_proccess_data_forNWB.ipynb --> This will create two .json files, df_stim.json with all of the timestamps for every event(T6000, T5000, stimROI...) aligned to neuropixel data. and the df_units.json, which holds all the information for every unit from every probe. both of these files gets saved to the intermediates folder here \\Record Node 103\\experiment1\\recording1\\continuous\\intermediates
 
