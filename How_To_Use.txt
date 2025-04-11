@@ -2,17 +2,26 @@ Date: 02-04-2025
 
 order of main files to run
 
-1. event_plots.ipynb --> allows you to make plots to see if Tones, optical pulses, and all events are correctly aligned. uses digital inputs from open-ephys to create plots
 
-2. pre_proccess_data_forNWB.ipynb --> This will create two .json files, df_stim.json with all of the timestamps for every event(T6000, T5000, stimROI...) aligned to neuropixel data. and the df_units.json, which holds all the information for every unit from every probe. both of these files gets saved to the intermediates folder here \\Record Node 103\\experiment1\\recording1\\continuous\\intermediates
+1. create_new_mouse_folder.ipynb --> this needs to be run first for a new mouse. it duplicates all files in the master folder, creating a new folder here mice/mouse_id, you should work and modify these files for each mouse
+> you just need to change the mouse_id = 'mouse_name'
 
-3. makeNWB.ipynb --> this takes the df_stim.json and df_units.json, and creates the final NWB
+-----------------------------------------------
+ONLY procced to here if you have already run create_new_mouse_folder.ipynb
+and only modify the files inside that specific mouses folder
+you can make global changes to the files in the master folder, but then those will get duplicated into all new mice files
 
-4. path_raster_NWB.ipynb --> this allows you to load in the NWB and make raster and PSTH plots for all the units and all the events
+1. analyze_data/event_plots.ipynb --> allows you to make plots to see if Tones, optical pulses, and all events are correctly aligned. uses digital inputs from open-ephys to create plots
+
+2. general_nwb_creation/pre_proccess_data_forNWB.ipynb --> This will create two .json files, df_stim.json with all of the timestamps for every event(T6000, T5000, stimROI...) aligned to neuropixel data. and the df_units.json, which holds all the information for every unit from every probe. both of these files gets saved to the intermediates folder here \\Record Node 103\\experiment1\\recording1\\continuous\\intermediates
+
+3. general_nwb_creation/makeNWB.ipynb --> this takes the df_stim.json and df_units.json, and creates the final NWB
+
+4. analyze_data/path_raster_NWB.ipynb --> this allows you to load in the NWB and make raster and PSTH plots for all the units and all the events
 
 ----------------------------------------------
 Extra Code Packages
 
-1.  manually_align_timestamps.ipynb --> this is for the instance when the timestamps.npy file is coruputed from open-ephys, this notebook allows you to re-create the timestamps.npy files.
+1. general_nwb_creation/manually_align_timestamps.ipynb --> this is for the instance when the timestamps.npy file is coruputed from open-ephys, this notebook allows you to re-create the timestamps.npy files.
 
-2. viewNWB.ipynb --> this allows you to look at the NWB in-depth if you want
+2. analyze_data/viewNWB.ipynb --> this allows you to look at the NWB in-depth if you want
