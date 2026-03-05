@@ -12,7 +12,15 @@ def seperate_good_mua_units(df_units):
     dfE_total = df_units[df_units.probe == 'E']
     dfF_total = df_units[df_units.probe == 'F']
 
-    dfA_good = df_units[(df_units.probe == 'A') & (df_units.KSlabel == 2)]
+    # New code
+    dfA_good = df_units[df_units.probe=='A'][df_units.KSlabel==2] # these are the "good" labelled units from phy before curation
+    dfA_good = dfA_good.reset_index()                     # New Code
+    dfA_good = dfA_good.rename(columns={'id': 'cluster_id'})   # New Code
+    dfA_good
+
+    dfA_SIM_good = dfA_good[dfA_good.Brain_Region=='SIM'] # these are the "good" labelled units from phy before curation
+    dfA_IP_good = dfA_good[dfA_good.Brain_Region=='IP'] # these are the "good" labelled units from phy before curation
+
     dfB_good = df_units[(df_units.probe == 'B') & (df_units.KSlabel == 2)]
     dfC_good = df_units[(df_units.probe == 'C') & (df_units.KSlabel == 2)]
     dfD_good = df_units[(df_units.probe == 'D') & (df_units.KSlabel == 2)]
@@ -29,6 +37,9 @@ def seperate_good_mua_units(df_units):
     print(f'Total units in probe A: {len(dfA_total)}')
     print(f'Good units in probe A: {len(dfA_good)} --> SIM & IP')
     print(f'MUA units in probe A: {len(dfA_mua)} --> SIM & IP\n')
+
+    print(f'Total units in probe A SIM: {len(dfA_SIM_good)}')
+    print(f'Total units in probe A IP: {len(dfA_IP_good)}\n')
 
     print(f'Total units in probe B: {len(dfB_total)}')
     print(f'Good units in probe B: {len(dfB_good)} --> PG')
@@ -51,7 +62,7 @@ def seperate_good_mua_units(df_units):
     print(f'MUA units in probe F: {len(dfF_mua)} --> RN')
 
     return (
-        dfA_good, dfB_good, dfC_good, dfD_good, dfE_good, dfF_good,
+        dfA_good, dfA_SIM_good, dfA_IP_good, dfB_good, dfC_good, dfD_good, dfE_good, dfF_good,
         dfA_mua, dfB_mua, dfC_mua, dfD_mua, dfE_mua, dfF_mua
     )
 

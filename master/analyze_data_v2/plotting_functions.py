@@ -474,7 +474,7 @@ def trial_by_trial_subplots(spike_times, event_times, pre, post, bin_size):
 
     return psth, var, edges, bytrial
 
-def singleUnit_psth_raster_test(spike_times, event_times,unit_id, pre, post, bin_size=0.01):
+def singleUnit_psth_raster_test(spike_times, event_times,unit_id, pre, post, bin_size=0.01,brain_region=None):
     fig, ax = plt.subplots(2,1)  # Initialize the plot
     fig.set_size_inches(10, 8)  # Set the figure size
 
@@ -495,7 +495,7 @@ def singleUnit_psth_raster_test(spike_times, event_times,unit_id, pre, post, bin
 
     ax[0].set_ylabel('Firing Rate [Hz]')
     ax[0].set_xlabel('Time [s]')
-    ax[0].set_title(f'PSTH - {unit_id}')
+    ax[0].set_title(f'PSTH - {unit_id} - {brain_region}')
 
 
     for t, time in enumerate(event_times):
