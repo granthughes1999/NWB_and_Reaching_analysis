@@ -16,7 +16,6 @@ def seperate_good_mua_units(df_units):
     dfA_good = df_units[df_units.probe=='A'][df_units.KSlabel==2] # these are the "good" labelled units from phy before curation
     dfA_good = dfA_good.reset_index()                     # New Code
     dfA_good = dfA_good.rename(columns={'id': 'cluster_id'})   # New Code
-    dfA_good
 
     dfA_SIM_good = dfA_good[dfA_good.Brain_Region=='SIM'] # these are the "good" labelled units from phy before curation
     dfA_IP_good = dfA_good[dfA_good.Brain_Region=='IP'] # these are the "good" labelled units from phy before curation
