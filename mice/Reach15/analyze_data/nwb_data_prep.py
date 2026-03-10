@@ -282,7 +282,9 @@ def load_or_build_processed_bundle(
             _cols0 = set(_md[_probe0].columns)
 
             _has_bombcell_cols = ("in_brainRegion" in _cols0) and ("brain_region" in _cols0)
-            if (not _has_bombcell_cols) and use_bombcell_if_available and bombcell_root_str != "":
+            _has_bombcell_cols_2 = ("Brain_Region_x" in _cols0) and ("bc_ROI_x" in _cols0)
+            _has_any_bombcell_cols = _has_bombcell_cols or _has_bombcell_cols_2
+            if (not _has_any_bombcell_cols) and use_bombcell_if_available and bombcell_root_str != "":
                 if verbose:
                     print("Existing bundle missing Bombcell columns. Rebuild requested.")
                 rebuild_required = True
@@ -404,6 +406,61 @@ def load_bombcell_metrics(
     cluster_dic: dict[str, pd.DataFrame] = {}
     report: dict[str, list[str]] = {"loaded_qm": [], "loaded_cluster": [], "missing": []}
 
+    def _read_table(path: Path, *, sep: str | None = None) -> pd.DataFrame | None:
+        if not path.exists():
+            return None
+        if sep is None:
+            sep = "\t" if path.suffix.lower() == ".tsv" else ","
+        df = pd.read_csv(path, sep=sep)
+        df.columns = [str(c).strip() for c in df.columns]
+        return df
+
+    def _looks_like_cluster_table(df: pd.DataFrame) -> bool:
+        if df is None or df.empty:
+            return False
+        cols = set(df.columns)
+        if "cluster_id" not in cols:
+            return False
+        expected = {"bc_classificationReason", "bc_unitType", "bc_ROI", "Brain_Region", "KSLabel"}
+        return len(cols.intersection(expected)) > 0
+
+    def _build_cluster_table_from_parts(pdir: Path) -> pd.DataFrame | None:
+        pieces: list[pd.DataFrame] = []
+        part_specs = [
+            ("cluster_bc_classificationReason.tsv", "bc_classificationReason"),
+            ("cluster_bc_classificationreason.tsv", "bc_classificationReason"),
+            ("cluster_bc_classification_reason.tsv", "bc_classificationReason"),
+            ("cluster_bc_classificationReason.csv", "bc_classificationReason"),
+            ("cluster_bc_unitType.tsv", "bc_unitType"),
+            ("cluster_bc_ROI.tsv", "bc_ROI"),
+            ("cluster_Brain_Region.tsv", "Brain_Region"),
+            ("cluster_KSLabel.tsv", "KSLabel"),
+        ]
+
+        for filename, value_col in part_specs:
+            df = _read_table(pdir / filename)
+            if df is None or "cluster_id" not in df.columns or value_col not in df.columns:
+                continue
+            piece = df.loc[:, ["cluster_id", value_col]].copy()
+            piece["cluster_id"] = pd.to_numeric(piece["cluster_id"], errors="coerce")
+            piece = piece.dropna(subset=["cluster_id"]).drop_duplicates(subset=["cluster_id"], keep="first")
+            if piece.empty:
+                continue
+            piece["cluster_id"] = piece["cluster_id"].astype(int)
+            pieces.append(piece)
+
+        if len(pieces) == 0:
+            return None
+
+        out = pieces[0]
+        for piece in pieces[1:]:
+            out = out.merge(piece, on="cluster_id", how="outer")
+
+        out = out.sort_values("cluster_id").reset_index(drop=True)
+        if "bc_classificationReason" not in out.columns and "bc_unitType" in out.columns:
+            out["bc_classificationReason"] = out["bc_unitType"]
+        return out
+
     # Pre-index potential probe dirs once
     ks_probe_dirs = [d for d in root.rglob("*") if d.is_dir() and d.name.lower().startswith("kilosort4_")]
     dir_map = {}
@@ -438,8 +495,16 @@ def load_bombcell_metrics(
             pdir / "cluster_bc_classification_reason.tsv",
         ]
         cpath = next((x for x in cluster_candidates if x.exists()), None)
+        cl = None
         if cpath is not None:
-            cl = pd.read_csv(cpath, sep="\t")
+            cl = _read_table(cpath)
+            if not _looks_like_cluster_table(cl):
+                cl = None
+
+        if cl is None:
+            cl = _build_cluster_table_from_parts(pdir)
+
+        if cl is not None and _looks_like_cluster_table(cl):
             cluster_dic[probe] = cl
             report["loaded_cluster"].append(probe)
         else:
@@ -1466,6 +1531,20 @@ def merge_units_with_metrics(
         out["cluster_id"] = np.arange(len(out), dtype=int)
         return out
 
+    def _attach_cluster_id_or_raise(df: pd.DataFrame, cluster_ids: pd.Series, *, probe: str, source_name: str) -> pd.DataFrame:
+        out = df.copy().reset_index(drop=True)
+        if "cluster_id" in out.columns:
+            out["cluster_id"] = pd.to_numeric(out["cluster_id"], errors="coerce")
+            return out
+        if len(out) != len(cluster_ids):
+            raise ValueError(
+                f"{source_name} table for probe {probe} is missing cluster_id and has {len(out)} rows, "
+                f"but the NWB units table has {len(cluster_ids)} rows. "
+                f"Check the Bombcell file contents for this probe."
+            )
+        out["cluster_id"] = cluster_ids.values
+        return out
+
     merged_dic: dict[str, pd.DataFrame] = {}
     for probe, u0 in df_units_dic.items():
         u = u0.copy().reset_index(drop=True)
@@ -1477,9 +1556,7 @@ def merge_units_with_metrics(
         m = _ensure_cluster_id(u)
 
         if qm_dic is not None and probe in qm_dic:
-            qm = qm_dic[probe].copy().reset_index(drop=True)
-            if "cluster_id" not in qm.columns and "cluster_id" in m.columns:
-                qm["cluster_id"] = m["cluster_id"].values
+            qm = _attach_cluster_id_or_raise(qm_dic[probe], m["cluster_id"], probe=str(probe), source_name="Bombcell qMetrics")
             if "cluster_id" in qm.columns:
                 qm["cluster_id"] = pd.to_numeric(qm["cluster_id"], errors="coerce")
                 keep_qm = [c for c in ["cluster_id", "nSpikes", "maxDriftEstimate", "maxChannels"] if c in qm.columns]
@@ -1487,9 +1564,7 @@ def merge_units_with_metrics(
                     m = m.merge(qm[keep_qm], on="cluster_id", how="left")
 
         if cluster_dic is not None and probe in cluster_dic:
-            cl = cluster_dic[probe].copy().reset_index(drop=True)
-            if "cluster_id" not in cl.columns and "cluster_id" in m.columns:
-                cl["cluster_id"] = m["cluster_id"].values
+            cl = _attach_cluster_id_or_raise(cluster_dic[probe], m["cluster_id"], probe=str(probe), source_name="Bombcell cluster")
             if "cluster_id" in cl.columns:
                 cl["cluster_id"] = pd.to_numeric(cl["cluster_id"], errors="coerce")
                 keep_cl = [c for c in ["cluster_id", "bc_classificationReason", "bc_ROI", "Brain_Region"] if c in cl.columns]

@@ -670,3 +670,621 @@ def verify_task_epoch_structure(
     #     "used_epochs": {"baseline": base, "stim": stim_epochs, "wash": wash_epochs},
     #     "split_reports": split_reports,
     # }
+
+def _normalize_condition_token(value):
+    s = str(value).strip().lower()
+    if s.startswith("stim"):
+        return "stimulation"
+    if s.startswith("wash"):
+        return "washout"
+    if s.startswith("base"):
+        return "baseline"
+    return s
+
+
+def _expected_condition_for_align_source(source_name):
+    src = _normalize_source_name_for_plot(source_name).lower()
+    if src.startswith("baseline_reachinit"):
+        return "baseline"
+    if src.startswith("stimulation_reachinit"):
+        return "stimulation"
+    if src.startswith("washout_reachinit"):
+        return "washout"
+    if src == "stimroi_start_times":
+        return "stimulation"
+    return None
+
+
+def _infer_align_source_name(pca_event_meta, align_to=None, start_time_source_col="start_time_source"):
+    if align_to is not None:
+        return _normalize_source_name_for_plot(align_to)
+    if isinstance(pca_event_meta, pd.DataFrame) and start_time_source_col in pca_event_meta.columns:
+        vals = [
+            _normalize_source_name_for_plot(v)
+            for v in pca_event_meta[start_time_source_col].dropna().astype(str).unique().tolist()
+            if str(v).strip() != ""
+        ]
+        if len(vals) == 1:
+            return vals[0]
+        if len(vals) > 1:
+            return ", ".join(vals)
+    return "start_time"
+
+def _normalize_source_name_for_plot(value):
+    s = str(value).strip()
+    if s == "":
+        return "start_time"
+    key = s.lower().replace("-", "_").replace(" ", "_")
+    alias = {
+        "reachinit": "all_stimROI_triggers_start_times",
+        "reachinit_stimroi": "all_stimROI_triggers_start_times",
+        "reachinit_stimroi_timestamps": "all_stimROI_triggers_start_times",
+        "all_stimroi_triggers": "all_stimROI_triggers_start_times",
+        "all_stimroi_triggers_start_times": "all_stimROI_triggers_start_times",
+        "baseline_reachinit_stimroi_timestamps": "baseline_reachInit_stimROI_timestamps",
+        "baseline_reachinit_stimroi_start_times": "baseline_reachInit_stimROI_timestamps",
+        "stimulation_reachinit_stimroi_timestamps": "stimulation_reachInit_stimROI_timestamps",
+        "stimulation_reachinit_stimroi_start_times": "stimulation_reachInit_stimROI_timestamps",
+        "washout_reachinit_stimroi_timestamps": "washout_reachInit_stimROI_timestamps",
+        "washout_reachinit_stimroi_start_times": "washout_reachInit_stimROI_timestamps",
+    }
+    return alias.get(key, s)
+
+def _plot_event_source_vs_label(
+    pca_event_meta,
+    *,
+    label_col,
+    align_to=None,
+    trial_col=None,
+    time_col="start_time",
+    start_time_source_col="start_time_source",
+    figsize=(16, 5),
+    save_plot_path=None,
+    title_prefix="",
+):
+    if not isinstance(pca_event_meta, pd.DataFrame):
+        raise TypeError("pca_event_meta must be a pandas DataFrame.")
+    if label_col not in pca_event_meta.columns:
+        raise ValueError(f"Missing column '{label_col}' in pca_event_meta.")
+
+    df = pca_event_meta.copy().reset_index(drop=True)
+    source_name = _infer_align_source_name(df, align_to=align_to, start_time_source_col=start_time_source_col)
+    expected_condition = _expected_condition_for_align_source(source_name)
+
+    chosen_x_col = None
+    for col in [trial_col, time_col, "trial_number", "trial_index0", "source_event_index"]:
+        if col is not None and col in df.columns:
+            chosen_x_col = col
+            break
+    if chosen_x_col is None:
+        df["_plot_order"] = np.arange(1, len(df) + 1, dtype=int)
+        chosen_x_col = "_plot_order"
+
+    df[chosen_x_col] = pd.to_numeric(df[chosen_x_col], errors="coerce")
+    df = df.dropna(subset=[chosen_x_col, label_col]).reset_index(drop=True)
+    if df.empty:
+        raise ValueError("No rows available to plot after dropping missing values.")
+
+    label_order = (
+        df[[label_col, chosen_x_col]]
+        .drop_duplicates(subset=[label_col], keep="first")
+        .sort_values(chosen_x_col)[label_col]
+        .astype(str)
+        .tolist()
+    )
+    label_y = {label: (len(label_order) - i) for i, label in enumerate(label_order)}
+    source_y = len(label_order) + 1.4
+
+    condition_color_map = {
+        "baseline": "blue",
+        "stimulation": "red",
+        "washout": "green",
+    }
+
+    if label_col == "condition_epoch":
+        label_condition = df[label_col].map(_normalize_condition_token)
+    else:
+        label_condition = df[label_col].map(_normalize_condition_token)
+    df["_label_condition"] = label_condition.astype(str)
+    df["_is_expected"] = True if expected_condition is None else df["_label_condition"].eq(str(expected_condition))
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    ax.scatter(
+        df[chosen_x_col].to_numpy(dtype=float),
+        np.full(len(df), source_y, dtype=float),
+        color="black",
+        s=42,
+        marker="D",
+        label=str(source_name),
+        zorder=4,
+    )
+
+    for _, row in df.iterrows():
+        x = float(row[chosen_x_col])
+        lbl = str(row[label_col])
+        y_lbl = float(label_y[lbl])
+        cond = str(row["_label_condition"])
+        is_expected = bool(row["_is_expected"])
+        line_color = "gray" if expected_condition is None else ("tab:blue" if is_expected else "crimson")
+        ax.plot([x, x], [y_lbl, source_y], color=line_color, linewidth=1.1, alpha=0.8, zorder=1)
+        ax.scatter(
+            x,
+            y_lbl,
+            color=condition_color_map.get(cond, "gray"),
+            edgecolors="black",
+            linewidths=0.35,
+            s=48,
+            marker="o",
+            zorder=3,
+        )
+
+    y_ticks = [source_y] + [label_y[label] for label in label_order]
+    y_labels = [f"EVENT_TIME_ALIGN_TO: {source_name}"] + label_order
+    ax.set_yticks(y_ticks)
+    ax.set_yticklabels(y_labels)
+
+    n_expected = int(df["_is_expected"].sum())
+    n_total = int(len(df))
+    if expected_condition is None:
+        title_suffix = f"rows={n_total}"
+    else:
+        title_suffix = f"expected {expected_condition}: {n_expected}/{n_total}"
+
+    ax.set_title(f"{title_prefix}\n{title_suffix}")
+    ax.set_xlabel(chosen_x_col.replace("_", " ").title())
+    ax.grid(axis="x", alpha=0.3)
+
+    all_x = df[chosen_x_col].to_numpy(dtype=float)
+    if all_x.size:
+        pad = 1.0 if chosen_x_col != time_col else max(0.05, 0.02 * (np.nanmax(all_x) - np.nanmin(all_x) + 1e-9))
+        ax.set_xlim(np.nanmin(all_x) - pad, np.nanmax(all_x) + pad)
+
+    from matplotlib.lines import Line2D
+
+    legend_handles = [
+        Line2D([0], [0], marker="D", color="none", markerfacecolor="black", markeredgecolor="black", label="selected align source"),
+        Line2D([0], [0], marker="o", color="none", markerfacecolor="white", markeredgecolor="black", label=label_col),
+    ]
+    if expected_condition is not None:
+        legend_handles.extend(
+            [
+                Line2D([0], [0], color="tab:blue", lw=1.5, label="expected overlap"),
+                Line2D([0], [0], color="crimson", lw=1.5, label="outside expected overlap"),
+            ]
+        )
+    ax.legend(handles=legend_handles, loc="upper right", frameon=False)
+
+    plt.tight_layout()
+    if save_plot_path is not None:
+        plt.savefig(save_plot_path, dpi=220, bbox_inches="tight")
+    plt.show()
+
+
+def _normalize_event_time_source_name(name: str) -> str:
+    key = str(name).strip().lower()
+    alias = {
+        "start_time": "start_time",
+        "reachinit": "all_stimROI_triggers_start_times",
+        "reachinit_stimroi": "all_stimROI_triggers_start_times",
+        "reachinit_stimroi_timestamps": "all_stimROI_triggers_start_times",
+        "trigger": "all_stimROI_triggers_start_times",
+        "all_stimroi_triggers_start_times": "all_stimROI_triggers_start_times",
+        "all_stimroi_triggers": "all_stimROI_triggers_start_times",
+        "tone1": "tone1_start_times",
+        "tone1_start_times": "tone1_start_times",
+        "tone2": "tone2_start_times",
+        "tone2_start_times": "tone2_start_times",
+        "stimroi": "stimROI_start_times",
+        "stimroi_start_times": "stimROI_start_times",
+        "optical": "optical_start_times",
+        "optical_start_times": "optical_start_times",
+        "baseline_reachinit_stimroi_timestamps": "baseline_reachInit_stimROI_start_times",
+        "baseline_reachinit_stimroi_start_times": "baseline_reachInit_stimROI_start_times",
+        "stimulation_reachinit_stimroi_timestamps": "stimulation_reachInit_stimROI_start_times",
+        "stimulation_reachinit_stimroi_start_times": "stimulation_reachInit_stimROI_start_times",
+        "washout_reachinit_stimroi_timestamps": "washout_reachInit_stimROI_start_times",
+        "washout_reachinit_stimroi_start_times": "washout_reachInit_stimROI_start_times",
+        "custom": "custom_event_start_times",
+        "custom_event": "custom_event_start_times",
+        "custom_event_start_times": "custom_event_start_times",
+    }
+    return alias.get(key, str(name).strip())
+
+def align_pca_event_meta_start_times(
+    pca_event_meta: pd.DataFrame,
+    *,
+    align_to: str = "all_stimROI_triggers_start_times",
+    tone1_start_times: np.ndarray | list[float] | None = None,
+    tone2_start_times: np.ndarray | list[float] | None = None,
+    stimROI_start_times: np.ndarray | list[float] | None = None,
+    optical_start_times: np.ndarray | list[float] | None = None,
+    all_stimROI_triggers_start_times: np.ndarray | list[float] | None = None,
+    baseline_reachInit_stimROI_start_times: np.ndarray | list[float] | None = None,
+    stimulation_reachInit_stimROI_start_times: np.ndarray | list[float] | None = None,
+    washout_reachInit_stimROI_start_times: np.ndarray | list[float] | None = None,
+    custom_event_start_times: np.ndarray | list[float] | None = None,
+    mismatch: str = "index_then_nearest",
+    max_delta_s: float | None = None,
+    drop_unmatched: bool = True,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """
+    Return a copy of pca_event_meta with start_time remapped to a selected event source.
+
+    Parameters
+    ----------
+    align_to:
+      One of:
+      - 'start_time' (keep existing values)
+      - 'tone1_start_times'
+      - 'tone2_start_times'
+      - 'stimROI_start_times'
+      - 'optical_start_times'
+      - 'all_stimROI_triggers_start_times' (reach-init trigger)
+      Common aliases are accepted (e.g. 'tone1', 'stimROI', 'optical', 'reachInit').
+
+    mismatch:
+      - 'index'              : strict trial_index0 -> source[index]
+      - 'nearest'            : nearest source event to existing start_time
+      - 'index_then_nearest' : index mapping first, then nearest for missing rows
+    """
+    if "trial_index0" not in pca_event_meta.columns:
+        raise ValueError("pca_event_meta must contain trial_index0.")
+    if "start_time" not in pca_event_meta.columns:
+        raise ValueError("pca_event_meta must contain start_time.")
+
+    mode = str(mismatch).strip().lower()
+    valid_modes = {"index", "nearest", "index_then_nearest"}
+    if mode not in valid_modes:
+        raise ValueError(f"Invalid mismatch='{mismatch}'. Use one of {sorted(valid_modes)}.")
+
+    source_name = _normalize_event_time_source_name(align_to)
+    source_map = {
+        "tone1_start_times": tone1_start_times,
+        "tone2_start_times": tone2_start_times,
+        "stimROI_start_times": stimROI_start_times,
+        "optical_start_times": optical_start_times,
+        "all_stimROI_triggers_start_times": all_stimROI_triggers_start_times,
+        "baseline_reachInit_stimROI_start_times": baseline_reachInit_stimROI_start_times,
+        "stimulation_reachInit_stimROI_start_times": stimulation_reachInit_stimROI_start_times,
+        "washout_reachInit_stimROI_start_times": washout_reachInit_stimROI_start_times,
+        "custom_event_start_times": custom_event_start_times,
+    }
+
+    em = pca_event_meta.copy().reset_index(drop=True)
+
+    if source_name == "start_time":
+        em["start_time"] = pd.to_numeric(em["start_time"], errors="coerce")
+        em["start_time_source"] = "start_time"
+        em["start_time_align_method"] = "existing"
+        em["start_time_align_abs_delta_s"] = 0.0
+        report = {
+            "source": "start_time",
+            "method": "existing",
+            "input_rows": int(len(pca_event_meta)),
+            "output_rows": int(len(em)),
+            "unmatched_rows": 0,
+        }
+        return em, report
+
+    if source_name not in source_map:
+        raise ValueError(
+            f"Unknown align_to='{align_to}'. "
+            "Expected start_time, tone1, tone2, stimROI, optical, custom_event_start_times, "
+            "or all_stimROI_triggers_start_times."
+        )
+
+    src = source_map[source_name]
+    if src is None:
+        raise ValueError(
+            f"align_to='{source_name}' requested, but corresponding array was not provided."
+        )
+    src_arr = np.asarray(src, dtype=float).ravel()
+    if src_arr.size == 0:
+        raise ValueError(f"Source array '{source_name}' is empty.")
+
+    trial_idx = pd.to_numeric(em["trial_index0"], errors="coerce").to_numpy(dtype=float)
+    ref_time = pd.to_numeric(em["start_time"], errors="coerce").to_numpy(dtype=float)
+
+    aligned = np.full(len(em), np.nan, dtype=float)
+    method = np.array(["unmatched"] * len(em), dtype=object)
+    delta = np.full(len(em), np.nan, dtype=float)
+
+    used_index = False
+    if mode in {"index", "index_then_nearest"}:
+        valid_idx = np.isfinite(trial_idx)
+        idx_int = np.zeros(len(em), dtype=int)
+        idx_int[valid_idx] = trial_idx[valid_idx].astype(int)
+        in_range = valid_idx & (idx_int >= 0) & (idx_int < src_arr.size)
+        aligned[in_range] = src_arr[idx_int[in_range]]
+        method[in_range] = "index"
+        delta[in_range] = np.abs(aligned[in_range] - ref_time[in_range])
+        used_index = True
+
+    if mode in {"nearest", "index_then_nearest"}:
+        need = np.isnan(aligned)
+        need_idx = np.flatnonzero(need)
+        if need_idx.size > 0:
+            nearest_val, nearest_dist = _nearest_event_time_lookup(ref_time[need], src_arr)
+            aligned[need] = nearest_val
+            delta[need] = nearest_dist
+            matched_idx = need_idx[np.isfinite(nearest_val)]
+            method[matched_idx] = "nearest"
+
+    if mode == "index" and np.isnan(aligned).any():
+        n_bad = int(np.isnan(aligned).sum())
+        raise ValueError(
+            f"Index alignment failed for {n_bad} rows. "
+            f"Source '{source_name}' length is {src_arr.size}, but some trial_index0 are out of range. "
+            "Use mismatch='index_then_nearest' or mismatch='nearest' to fill by nearest event time."
+        )
+
+    if max_delta_s is not None:
+        max_delta_s = float(max_delta_s)
+        too_far = np.isfinite(delta) & (delta > max_delta_s)
+        aligned[too_far] = np.nan
+        method[too_far] = "delta_exceeded"
+
+    em["start_time"] = aligned
+    em["start_time_source"] = source_name
+    em["start_time_align_method"] = method
+    em["start_time_align_abs_delta_s"] = delta
+
+    if drop_unmatched:
+        em = em.dropna(subset=["start_time"]).reset_index(drop=True)
+
+    report = {
+        "source": source_name,
+        "method": mode,
+        "used_index": bool(used_index),
+        "input_rows": int(len(pca_event_meta)),
+        "output_rows": int(len(em)),
+        "unmatched_rows": int(np.isnan(aligned).sum()),
+    }
+    return em, report
+
+
+def _nearest_event_time_lookup(ref_times: np.ndarray, candidate_times: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    if candidate_times.size == 0:
+        out = np.full(ref_times.shape, np.nan, dtype=float)
+        d = np.full(ref_times.shape, np.nan, dtype=float)
+        return out, d
+
+    cand = np.asarray(candidate_times, dtype=float)
+    cand = cand[np.isfinite(cand)]
+    if cand.size == 0:
+        out = np.full(ref_times.shape, np.nan, dtype=float)
+        d = np.full(ref_times.shape, np.nan, dtype=float)
+        return out, d
+
+    cand_sorted = np.sort(cand)
+    ref = np.asarray(ref_times, dtype=float)
+    out = np.full(ref.shape, np.nan, dtype=float)
+    d = np.full(ref.shape, np.nan, dtype=float)
+
+    valid = np.isfinite(ref)
+    if not np.any(valid):
+        return out, d
+
+    x = ref[valid]
+    right = np.searchsorted(cand_sorted, x, side="left")
+    left = np.clip(right - 1, 0, cand_sorted.size - 1)
+    right = np.clip(right, 0, cand_sorted.size - 1)
+
+    left_val = cand_sorted[left]
+    right_val = cand_sorted[right]
+    choose_right = np.abs(right_val - x) < np.abs(left_val - x)
+    picked = np.where(choose_right, right_val, left_val)
+    dist = np.abs(picked - x)
+
+    out[valid] = picked
+    d[valid] = dist
+    return out, d
+
+
+
+
+def plot_real_condition_vs_condition_epoch(
+    pca_event_meta,
+    *,
+    trial_col=None,
+    real_condition_col="real_condition",
+    condition_epoch_col="condition_epoch",
+    figsize=(16, 5),
+    save_plot_path=None,
+):
+    """
+    Compare the idealized condition_epoch labels against real_condition labels
+    across trial order.
+
+    The plot stacks the original condition_epoch rows above the real_condition
+    rows and draws a connector for each trial so mismatches are easy to spot.
+    """
+
+    if not isinstance(pca_event_meta, pd.DataFrame):
+        raise TypeError("pca_event_meta must be a pandas DataFrame.")
+    if condition_epoch_col not in pca_event_meta.columns:
+        raise ValueError(f"Missing column '{condition_epoch_col}' in pca_event_meta.")
+    if real_condition_col not in pca_event_meta.columns:
+        raise ValueError(f"Missing column '{real_condition_col}' in pca_event_meta.")
+
+    def _norm_condition(value):
+        s = str(value).strip().lower()
+        if s.startswith("stim"):
+            return "stimulation"
+        if s.startswith("wash"):
+            return "washout"
+        if s.startswith("base"):
+            return "baseline"
+        return s
+
+    def _pick_trial_col(df):
+        for col in [trial_col, "trial_number", "trial_index0", "start_time"]:
+            if col is not None and col in df.columns:
+                return col
+        return None
+
+    df = pca_event_meta.copy().reset_index(drop=True)
+    chosen_trial_col = _pick_trial_col(df)
+    if chosen_trial_col is None:
+        df["_plot_trial_order"] = np.arange(1, len(df) + 1, dtype=int)
+        chosen_trial_col = "_plot_trial_order"
+
+    df[chosen_trial_col] = pd.to_numeric(df[chosen_trial_col], errors="coerce")
+    df = df.dropna(subset=[chosen_trial_col, condition_epoch_col, real_condition_col]).reset_index(drop=True)
+    if df.empty:
+        raise ValueError("No rows available to plot after dropping missing values.")
+
+    df = df.sort_values([chosen_trial_col, condition_epoch_col]).reset_index(drop=True)
+    df["ideal_condition"] = df[condition_epoch_col].map(_norm_condition)
+    df["real_condition_norm"] = df[real_condition_col].map(_norm_condition)
+    df["is_mismatch"] = df["ideal_condition"] != df["real_condition_norm"]
+
+    condition_epoch_order = (
+        df[[condition_epoch_col, chosen_trial_col]]
+        .drop_duplicates(subset=[condition_epoch_col], keep="first")
+        .sort_values(chosen_trial_col)[condition_epoch_col]
+        .astype(str)
+        .tolist()
+    )
+
+    real_condition_order = [
+        cond for cond in ["baseline", "stimulation", "washout"]
+        if cond in set(df["real_condition_norm"].astype(str))
+    ]
+    extra_real_conditions = sorted(
+        {str(v) for v in df["real_condition_norm"].astype(str)}
+        - set(real_condition_order)
+    )
+    real_condition_order.extend(extra_real_conditions)
+
+    n_epoch_rows = len(condition_epoch_order)
+    gap = 1.2
+    epoch_y = {
+        label: (n_epoch_rows - i + len(real_condition_order) + gap)
+        for i, label in enumerate(condition_epoch_order)
+    }
+    real_y = {
+        label: (len(real_condition_order) - i)
+        for i, label in enumerate(real_condition_order)
+    }
+
+    color_map = {
+        "baseline": "blue",
+        "stimulation": "red",
+        "washout": "green",
+    }
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    for _, row in df.iterrows():
+        x = float(row[chosen_trial_col])
+        ideal_label = str(row[condition_epoch_col])
+        real_label = str(row["real_condition_norm"])
+        y0 = float(epoch_y[ideal_label])
+        y1 = float(real_y[real_label])
+        line_color = "crimson" if bool(row["is_mismatch"]) else "lightgray"
+        ax.plot([x, x], [y1, y0], color=line_color, linewidth=1.2, alpha=0.8, zorder=1)
+        ax.scatter(
+            x,
+            y0,
+            color=color_map.get(str(row["ideal_condition"]), "gray"),
+            edgecolors="black",
+            linewidths=0.35,
+            s=38,
+            marker="o",
+            zorder=3,
+        )
+        ax.scatter(
+            x,
+            y1,
+            color=color_map.get(real_label, "gray"),
+            edgecolors="black",
+            linewidths=0.35,
+            s=52,
+            marker="s",
+            zorder=4,
+        )
+
+    if len(condition_epoch_order) > 0 and len(real_condition_order) > 0:
+        sep_y = len(real_condition_order) + (gap * 0.55)
+        ax.axhline(sep_y, color="black", linestyle="--", linewidth=0.8, alpha=0.5)
+
+    y_ticks = [epoch_y[label] for label in condition_epoch_order] + [real_y[label] for label in real_condition_order]
+    y_labels = condition_epoch_order + [f"real: {label}" for label in real_condition_order]
+    ax.set_yticks(y_ticks)
+    ax.set_yticklabels(y_labels)
+
+    mismatch_count = int(df["is_mismatch"].sum())
+    ax.set_xlabel(chosen_trial_col.replace("_", " ").title())
+    ax.set_title(
+        "Real Condition vs Condition Epoch\n"
+        f"Rows={len(df)} | mismatches={mismatch_count}"
+    )
+    ax.grid(axis="x", alpha=0.3)
+
+    all_x = df[chosen_trial_col].to_numpy(dtype=float)
+    if all_x.size:
+        ax.set_xlim(np.nanmin(all_x) - 1, np.nanmax(all_x) + 1)
+
+    from matplotlib.lines import Line2D
+
+    legend_handles = [
+        Line2D([0], [0], marker="o", color="none", markerfacecolor="white", markeredgecolor="black", label="condition_epoch row"),
+        Line2D([0], [0], marker="s", color="none", markerfacecolor="white", markeredgecolor="black", label="real_condition row"),
+        Line2D([0], [0], color="lightgray", lw=1.5, label="match"),
+        Line2D([0], [0], color="crimson", lw=1.5, label="mismatch"),
+    ]
+    ax.legend(handles=legend_handles, loc="upper right", frameon=False)
+
+    plt.tight_layout()
+    if save_plot_path is not None:
+        plt.savefig(save_plot_path, dpi=220, bbox_inches="tight")
+    plt.show()
+
+def plot_event_time_align_to_vs_real_condition(
+    pca_event_meta,
+    *,
+    align_to=None,
+    trial_col=None,
+    time_col="start_time",
+    start_time_source_col="start_time_source",
+    real_condition_col="real_condition",
+    figsize=(16, 5),
+    save_plot_path=None,
+):
+    return _plot_event_source_vs_label(
+        pca_event_meta,
+        label_col=real_condition_col,
+        align_to=align_to,
+        trial_col=trial_col,
+        time_col=time_col,
+        start_time_source_col=start_time_source_col,
+        figsize=figsize,
+        save_plot_path=save_plot_path,
+        title_prefix="EVENT_TIME_ALIGN_TO vs Real Condition",
+    )
+
+
+def plot_event_time_align_to_vs_condition_epoch(
+    pca_event_meta,
+    *,
+    align_to=None,
+    trial_col=None,
+    time_col="start_time",
+    start_time_source_col="start_time_source",
+    condition_epoch_col="condition_epoch",
+    figsize=(16, 6),
+    save_plot_path=None,
+):
+    return _plot_event_source_vs_label(
+        pca_event_meta,
+        label_col=condition_epoch_col,
+        align_to=align_to,
+        trial_col=trial_col,
+        time_col=time_col,
+        start_time_source_col=start_time_source_col,
+        figsize=figsize,
+        save_plot_path=save_plot_path,
+        title_prefix="EVENT_TIME_ALIGN_TO vs Condition Epoch",
+    )

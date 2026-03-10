@@ -14,9 +14,8 @@ def seperate_good_mua_units(df_units):
 
     # New code
     dfA_good = df_units[df_units.probe=='A'][df_units.KSlabel==2] # these are the "good" labelled units from phy before curation
-    dfA_good = dfA_good.reset_index()                     # New Code
-    dfA_good = dfA_good.rename(columns={'id': 'cluster_id'})   # New Code
-    dfA_good
+    # dfA_good = dfA_good.reset_index()                     # New Code
+    # dfA_good = dfA_good.rename(columns={'id': 'cluster_id'})   # New Code
 
     dfA_SIM_good = dfA_good[dfA_good.Brain_Region=='SIM'] # these are the "good" labelled units from phy before curation
     dfA_IP_good = dfA_good[dfA_good.Brain_Region=='IP'] # these are the "good" labelled units from phy before curation
@@ -33,6 +32,32 @@ def seperate_good_mua_units(df_units):
     dfD_mua = df_units[(df_units.probe == 'D') & (df_units.KSlabel == 1)]
     dfE_mua = df_units[(df_units.probe == 'E') & (df_units.KSlabel == 1)]
     dfF_mua = df_units[(df_units.probe == 'F') & (df_units.KSlabel == 1)]
+
+    # # Change ID to cluster_id for all good and mua dataframes
+    # dfB_good = dfB_good.reset_index()
+    # dfB_good = dfB_good.rename(columns={'id': 'cluster_id'})
+    # dfC_good = dfC_good.reset_index()
+    # dfC_good = dfC_good.rename(columns={'id': 'cluster_id'})
+    # dfD_good = dfD_good.reset_index()
+    # dfD_good = dfD_good.rename(columns={'id': 'cluster_id'})
+    # dfE_good = dfE_good.reset_index()
+    # dfE_good = dfE_good.rename(columns={'id': 'cluster_id'})
+    # dfF_good = dfF_good.reset_index()
+    # dfF_good = dfF_good.rename(columns={'id': 'cluster_id'})
+
+
+    # dfA_mua = dfA_mua.reset_index()
+    # dfA_mua = dfA_mua.rename(columns={'id': 'cluster_id'})
+    # dfB_mua = dfB_mua.reset_index()
+    # dfB_mua = dfB_mua.rename(columns={'id': 'cluster_id'})
+    # dfC_mua = dfC_mua.reset_index()
+    # dfC_mua = dfC_mua.rename(columns={'id': 'cluster_id'})
+    # dfD_mua = dfD_mua.reset_index()
+    # dfD_mua = dfD_mua.rename(columns={'id': 'cluster_id'})
+    # dfE_mua = dfE_mua.reset_index()
+    # dfE_mua = dfE_mua.rename(columns={'id': 'cluster_id'})
+    # dfF_mua = dfF_mua.reset_index()
+    # dfF_mua = dfF_mua.rename(columns={'id': 'cluster_id'})
 
     print(f'Total units in probe A: {len(dfA_total)}')
     print(f'Good units in probe A: {len(dfA_good)} --> SIM & IP')

@@ -65,6 +65,10 @@ class nwb_loader:
         df_stim = self.trials()
         df_units.probe.unique(),df_stim.stimulus.unique()
 
+        # Change ID to cluster_id
+        df_units = df_units.reset_index()                     # New Code
+        df_units = df_units.rename(columns={'id': 'cluster_id'})   # New Code
+
         # print unique names inside stimulus
         unit_probes = np.array(df_units.probe.unique())
         print('\n===== Total units Per Probe ====')

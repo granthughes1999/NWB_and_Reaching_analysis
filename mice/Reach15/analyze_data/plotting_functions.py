@@ -399,6 +399,8 @@ def trial_by_trial(spike_times, event_times, pre, post, bin_size,brain_region=No
     spike_times = np.array(spike_times).astype(float) 
     event_times = np.array(event_times).astype(float)
 
+    spike_times_count = len(spike_times)
+    
     numbins  = np.round(((pre+post)/bin_size)).astype(int)
     edges    = np.linspace(-pre,post,numbins)
     

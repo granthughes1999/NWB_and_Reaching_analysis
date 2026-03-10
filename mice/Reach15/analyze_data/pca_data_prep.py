@@ -283,14 +283,11 @@ def load_or_build_processed_bundle(
             _cols0 = set(_md[_probe0].columns)
 
             _has_bombcell_cols = ("in_brainRegion" in _cols0) and ("brain_region" in _cols0)
-            _has_bombcell_cols_2 = ('Brain_Region_x' in _cols0) and ('bc_ROI_x' in _cols0)
-            if (not _has_bombcell_cols) and use_bombcell_if_available and bombcell_root_str != "":
+            _has_bombcell_cols_2 = ("Brain_Region_x" in _cols0) and ("bc_ROI_x" in _cols0)
+            _has_any_bombcell_cols = _has_bombcell_cols or _has_bombcell_cols_2
+            if (not _has_any_bombcell_cols) and use_bombcell_if_available and bombcell_root_str != "":
                 if verbose:
                     print("Existing bundle missing Bombcell columns. Rebuild requested.")
-                rebuild_required = True
-            elif (not _has_bombcell_cols_2) and use_bombcell_if_available and bombcell_root_str != "":
-                if verbose:
-                    print("Existing bundle missing old-format Bombcell columns. Rebuild requested.")
                 rebuild_required = True
         except Exception as e:
             if verbose:
@@ -410,6 +407,61 @@ def load_bombcell_metrics(
     cluster_dic: dict[str, pd.DataFrame] = {}
     report: dict[str, list[str]] = {"loaded_qm": [], "loaded_cluster": [], "missing": []}
 
+    def _read_table(path: Path, *, sep: str | None = None) -> pd.DataFrame | None:
+        if not path.exists():
+            return None
+        if sep is None:
+            sep = "\t" if path.suffix.lower() == ".tsv" else ","
+        df = pd.read_csv(path, sep=sep)
+        df.columns = [str(c).strip() for c in df.columns]
+        return df
+
+    def _looks_like_cluster_table(df: pd.DataFrame) -> bool:
+        if df is None or df.empty:
+            return False
+        cols = set(df.columns)
+        if "cluster_id" not in cols:
+            return False
+        expected = {"bc_classificationReason", "bc_unitType", "bc_ROI", "Brain_Region", "KSLabel"}
+        return len(cols.intersection(expected)) > 0
+
+    def _build_cluster_table_from_parts(pdir: Path) -> pd.DataFrame | None:
+        pieces: list[pd.DataFrame] = []
+        part_specs = [
+            ("cluster_bc_classificationReason.tsv", "bc_classificationReason"),
+            ("cluster_bc_classificationreason.tsv", "bc_classificationReason"),
+            ("cluster_bc_classification_reason.tsv", "bc_classificationReason"),
+            ("cluster_bc_classificationReason.csv", "bc_classificationReason"),
+            ("cluster_bc_unitType.tsv", "bc_unitType"),
+            ("cluster_bc_ROI.tsv", "bc_ROI"),
+            ("cluster_Brain_Region.tsv", "Brain_Region"),
+            ("cluster_KSLabel.tsv", "KSLabel"),
+        ]
+
+        for filename, value_col in part_specs:
+            df = _read_table(pdir / filename)
+            if df is None or "cluster_id" not in df.columns or value_col not in df.columns:
+                continue
+            piece = df.loc[:, ["cluster_id", value_col]].copy()
+            piece["cluster_id"] = pd.to_numeric(piece["cluster_id"], errors="coerce")
+            piece = piece.dropna(subset=["cluster_id"]).drop_duplicates(subset=["cluster_id"], keep="first")
+            if piece.empty:
+                continue
+            piece["cluster_id"] = piece["cluster_id"].astype(int)
+            pieces.append(piece)
+
+        if len(pieces) == 0:
+            return None
+
+        out = pieces[0]
+        for piece in pieces[1:]:
+            out = out.merge(piece, on="cluster_id", how="outer")
+
+        out = out.sort_values("cluster_id").reset_index(drop=True)
+        if "bc_classificationReason" not in out.columns and "bc_unitType" in out.columns:
+            out["bc_classificationReason"] = out["bc_unitType"]
+        return out
+
     # Pre-index potential probe dirs once
     ks_probe_dirs = [d for d in root.rglob("*") if d.is_dir() and d.name.lower().startswith("kilosort4_")]
     dir_map = {}
@@ -444,8 +496,16 @@ def load_bombcell_metrics(
             pdir / "cluster_bc_classification_reason.tsv",
         ]
         cpath = next((x for x in cluster_candidates if x.exists()), None)
+        cl = None
         if cpath is not None:
-            cl = pd.read_csv(cpath, sep="\t")
+            cl = _read_table(cpath)
+            if not _looks_like_cluster_table(cl):
+                cl = None
+
+        if cl is None:
+            cl = _build_cluster_table_from_parts(pdir)
+
+        if cl is not None and _looks_like_cluster_table(cl):
             cluster_dic[probe] = cl
             report["loaded_cluster"].append(probe)
         else:
@@ -587,6 +647,115 @@ def check_stim_event_timing(df_stim, max_window=4.0, show_detailed_output=True) 
 
     return results
 
+def _real_condition_epoch_label(condition: str, epoch_id: int) -> str:
+    cond = str(condition).strip().lower()
+    ep = int(epoch_id)
+    if cond == "baseline" and ep == 0:
+        return "baseline_epoch"
+    return f"{cond}_epoch_{ep}"
+
+def _build_real_reachinit_epoch_table(
+    baseline_start_times,
+    stimulation_start_times,
+    washout_start_times,
+) -> pd.DataFrame:
+    rows = []
+    for cond, values in (
+        ("baseline", baseline_start_times),
+        ("stimulation", stimulation_start_times),
+        ("washout", washout_start_times),
+    ):
+        arr = np.asarray(values if values is not None else [], dtype=float).ravel()
+        if arr.size == 0:
+            continue
+        arr = arr[np.isfinite(arr)]
+        for start_time in arr.tolist():
+            rows.append({"start_time": float(start_time), "real_condition": cond})
+
+    if len(rows) == 0:
+        return pd.DataFrame(columns=["start_time", "real_condition", "real_epoch_id", "real_condition_epoch"])
+
+    real_df = pd.DataFrame(rows).sort_values("start_time", kind="mergesort").reset_index(drop=True)
+
+    counters = {"baseline": -1, "stimulation": 0, "washout": 0}
+    prev_cond = None
+    epoch_ids = []
+    labels = []
+    for cond in real_df["real_condition"].astype(str):
+        if cond != prev_cond:
+            counters.setdefault(cond, 0)
+            counters[cond] += 1
+            prev_cond = cond
+        ep = int(counters[cond])
+        epoch_ids.append(ep)
+        labels.append(_real_condition_epoch_label(cond, ep))
+
+    real_df["real_epoch_id"] = np.asarray(epoch_ids, dtype=int)
+    real_df["real_condition_epoch"] = labels
+    return real_df
+
+
+
+def _annotate_real_reachinit_epochs(
+    pca_event_meta: pd.DataFrame,
+    baseline_start_times,
+    stimulation_start_times,
+    washout_start_times,
+) -> pd.DataFrame:
+    out = pca_event_meta.copy()
+    if out.empty:
+        out["real_condition"] = []
+        out["real_epoch_id"] = []
+        out["real_condition_epoch"] = []
+        out["real_condition_source"] = []
+        out["real_condition_matched"] = []
+        return out
+
+    real_df = _build_real_reachinit_epoch_table(
+        baseline_start_times=baseline_start_times,
+        stimulation_start_times=stimulation_start_times,
+        washout_start_times=washout_start_times,
+    )
+
+    out["real_condition"] = out["condition"].astype(str)
+    out["real_epoch_id"] = pd.to_numeric(out["epoch_id"], errors="coerce").astype("Int64")
+    if "condition_epoch" in out.columns:
+        out["real_condition_epoch"] = out["condition_epoch"].astype(str)
+    else:
+        out["real_condition_epoch"] = [
+            _real_condition_epoch_label(cond, ep)
+            for cond, ep in zip(out["real_condition"].astype(str), out["real_epoch_id"].fillna(0).astype(int))
+        ]
+    out["real_condition_source"] = "original_condition"
+    out["real_condition_matched"] = False
+
+    if real_df.empty or "start_time" not in out.columns:
+        return out
+
+    real_df = real_df.copy()
+    real_df["_start_key"] = pd.to_numeric(real_df["start_time"], errors="coerce").round(9)
+    real_lookup = (
+        real_df.dropna(subset=["_start_key"])
+        .drop_duplicates(subset=["_start_key"], keep="first")
+        .set_index("_start_key")[["real_condition", "real_epoch_id", "real_condition_epoch"]]
+    )
+    if real_lookup.empty:
+        return out
+
+    event_start_key = pd.to_numeric(out["start_time"], errors="coerce").round(9)
+    matched = event_start_key.isin(real_lookup.index)
+
+    if bool(matched.any()):
+        out.loc[matched, "real_condition"] = event_start_key.loc[matched].map(real_lookup["real_condition"]).to_numpy()
+        out.loc[matched, "real_epoch_id"] = event_start_key.loc[matched].map(real_lookup["real_epoch_id"]).to_numpy()
+        out.loc[matched, "real_condition_epoch"] = event_start_key.loc[matched].map(real_lookup["real_condition_epoch"]).to_numpy()
+        out.loc[matched, "real_condition_source"] = "reachInit_stimROI_real_start_times"
+        out.loc[matched, "real_condition_matched"] = True
+
+    return out
+
+
+
 def build_pca_event_meta_and_event_times(
     stim_df,
     baseline_trials_idx,
@@ -600,6 +769,9 @@ def build_pca_event_meta_and_event_times(
     optical_stimulus="optical_timestamps",
     tone2_stimulus="tone2_timestamps",
     tone1_stimulus="tone1_timestamps",
+    baseline_reachInit_stimROI_start_times='baseline_reachInit_stimROI_timestamps',
+    stimulation_reachInit_stimROI_start_times='stimulation_reachInit_stimROI_timestamps',
+    washout_reachInit_stimROI_start_times='washout_reachInit_stimROI_timestamps'
 ):
     """
     Returns
@@ -608,6 +780,8 @@ def build_pca_event_meta_and_event_times(
         Per-trial metadata aligned to trigger_stimulus start times.
     tone1_start_times, tone2_start_times, stimROI_start_times, optical_start_times, all_stimROI_triggers_start_times : np.ndarray
         Raw event start times extracted from stim_df (after optional frame-event removal).
+    baseline_reachInit_stimROI_start_times, stimulation_reachInit_stimROI_start_times, washout_reachInit_stimROI_start_times : np.ndarray
+        Start times for reachInit_stimROI events in different epochs.
     """
 
     import numpy as np
@@ -633,12 +807,20 @@ def build_pca_event_meta_and_event_times(
     optical_df = df_stim[df_stim["stimulus"] == optical_stimulus]
     tone2_df = df_stim[df_stim["stimulus"] == tone2_stimulus]
     tone1_df = df_stim[df_stim["stimulus"] == tone1_stimulus]
+    baseline_reachInit_stimROI_df = df_stim[df_stim["stimulus"] == baseline_reachInit_stimROI_start_times]
+    stimulation_reachInit_stimROI_df = df_stim[df_stim["stimulus"] == stimulation_reachInit_stimROI_start_times]
+    washout_reachInit_stimROI_df = df_stim[df_stim["stimulus"] == washout_reachInit_stimROI_start_times]
 
     tone1_start_times = tone1_df["start_time"].to_numpy()
     tone2_start_times = tone2_df["start_time"].to_numpy()
     stimROI_start_times = stim_ROI_df["start_time"].to_numpy()
     optical_start_times = optical_df["start_time"].to_numpy()
     all_stimROI_triggers_start_times = all_stimROI_triggers["start_time"].to_numpy()
+    baseline_reachInit_stimROI_start_times = baseline_reachInit_stimROI_df["start_time"].to_numpy()
+    stimulation_reachInit_stimROI_start_times = stimulation_reachInit_stimROI_df["start_time"].to_numpy()
+    washout_reachInit_stimROI_start_times = washout_reachInit_stimROI_df["start_time"].to_numpy()
+
+
 
     def _flatten_idx(x):
         if isinstance(x, np.ndarray):
@@ -747,6 +929,12 @@ def build_pca_event_meta_and_event_times(
         .sort_values("trial_index0")
         .reset_index(drop=True)
     )
+    pca_event_meta = _annotate_real_reachinit_epochs(
+        pca_event_meta,
+        baseline_start_times=baseline_reachInit_stimROI_start_times,
+        stimulation_start_times=stimulation_reachInit_stimROI_start_times,
+        washout_start_times=washout_reachInit_stimROI_start_times,
+    )
 
     return (
         pca_event_meta,
@@ -755,6 +943,9 @@ def build_pca_event_meta_and_event_times(
         stimROI_start_times,
         optical_start_times,
         all_stimROI_triggers_start_times,
+        baseline_reachInit_stimROI_start_times, 
+        stimulation_reachInit_stimROI_start_times,
+        washout_reachInit_stimROI_start_times
     )
 
 
@@ -821,6 +1012,7 @@ def _nearest_event_time_lookup(ref_times: np.ndarray, candidate_times: np.ndarra
     return out, d
 
 
+
 def align_pca_event_meta_start_times(
     pca_event_meta: pd.DataFrame,
     *,
@@ -830,6 +1022,9 @@ def align_pca_event_meta_start_times(
     stimROI_start_times: np.ndarray | list[float] | None = None,
     optical_start_times: np.ndarray | list[float] | None = None,
     all_stimROI_triggers_start_times: np.ndarray | list[float] | None = None,
+    baseline_reachInit_stimROI_start_times: np.ndarray | list[float] | None = None,
+    stimulation_reachInit_stimROI_start_times: np.ndarray | list[float] | None = None,
+    washout_reachInit_stimROI_start_times: np.ndarray | list[float] | None = None,
     custom_event_start_times: np.ndarray | list[float] | None = None,
     mismatch: str = "index_then_nearest",
     max_delta_s: float | None = None,
@@ -872,6 +1067,9 @@ def align_pca_event_meta_start_times(
         "stimROI_start_times": stimROI_start_times,
         "optical_start_times": optical_start_times,
         "all_stimROI_triggers_start_times": all_stimROI_triggers_start_times,
+        "baseline_reachInit_stimROI_start_times": baseline_reachInit_stimROI_start_times,
+        "stimulation_reachInit_stimROI_start_times": stimulation_reachInit_stimROI_start_times,
+        "washout_reachInit_stimROI_start_times": washout_reachInit_stimROI_start_times,
         "custom_event_start_times": custom_event_start_times,
     }
 
@@ -966,6 +1164,7 @@ def align_pca_event_meta_start_times(
         "unmatched_rows": int(np.isnan(aligned).sum()),
     }
     return em, report
+
 
 
 def map_source_events_to_pca_trials(
@@ -1758,6 +1957,20 @@ def merge_units_with_metrics(
         out["cluster_id"] = np.arange(len(out), dtype=int)
         return out
 
+    def _attach_cluster_id_or_raise(df: pd.DataFrame, cluster_ids: pd.Series, *, probe: str, source_name: str) -> pd.DataFrame:
+        out = df.copy().reset_index(drop=True)
+        if "cluster_id" in out.columns:
+            out["cluster_id"] = pd.to_numeric(out["cluster_id"], errors="coerce")
+            return out
+        if len(out) != len(cluster_ids):
+            raise ValueError(
+                f"{source_name} table for probe {probe} is missing cluster_id and has {len(out)} rows, "
+                f"but the NWB units table has {len(cluster_ids)} rows. "
+                f"Check the Bombcell file contents for this probe."
+            )
+        out["cluster_id"] = cluster_ids.values
+        return out
+
     merged_dic: dict[str, pd.DataFrame] = {}
     for probe, u0 in df_units_dic.items():
         u = u0.copy().reset_index(drop=True)
@@ -1769,9 +1982,7 @@ def merge_units_with_metrics(
         m = _ensure_cluster_id(u)
 
         if qm_dic is not None and probe in qm_dic:
-            qm = qm_dic[probe].copy().reset_index(drop=True)
-            if "cluster_id" not in qm.columns and "cluster_id" in m.columns:
-                qm["cluster_id"] = m["cluster_id"].values
+            qm = _attach_cluster_id_or_raise(qm_dic[probe], m["cluster_id"], probe=str(probe), source_name="Bombcell qMetrics")
             if "cluster_id" in qm.columns:
                 qm["cluster_id"] = pd.to_numeric(qm["cluster_id"], errors="coerce")
                 keep_qm = [c for c in ["cluster_id", "nSpikes", "maxDriftEstimate", "maxChannels"] if c in qm.columns]
@@ -1779,9 +1990,7 @@ def merge_units_with_metrics(
                     m = m.merge(qm[keep_qm], on="cluster_id", how="left")
 
         if cluster_dic is not None and probe in cluster_dic:
-            cl = cluster_dic[probe].copy().reset_index(drop=True)
-            if "cluster_id" not in cl.columns and "cluster_id" in m.columns:
-                cl["cluster_id"] = m["cluster_id"].values
+            cl = _attach_cluster_id_or_raise(cluster_dic[probe], m["cluster_id"], probe=str(probe), source_name="Bombcell cluster")
             if "cluster_id" in cl.columns:
                 cl["cluster_id"] = pd.to_numeric(cl["cluster_id"], errors="coerce")
                 keep_cl = [c for c in ["cluster_id", "bc_classificationReason", "bc_ROI", "Brain_Region"] if c in cl.columns]
@@ -2436,7 +2645,7 @@ def session_to_analyze(MOUSE=None,BEHAVIORAL_FOLDER=None,
     return MOUSE, BEHAVIORAL_FOLDER,PROBE_A_CH_CONFIG, PROBE_C_CH_CONFIG, PROBE_D_CH_CONFIG, NP_FILE, NWB_FILE, DATE, SESSION, BOMBCELL
 
 
-def setup_paths_and_verify(PROBES=['A', 'B', 'C', 'D', 'E', 'F'], NWB_FILE=None, NP_FILE=None, DATE=None, SESSION=None, BEHAVIORAL_FOLDER=None, BOMBCELL=None):
+def setup_paths_and_verify_v1(PROBES=['A', 'B', 'C', 'D', 'E', 'F'], NWB_FILE=None, NP_FILE=None, DATE=None, SESSION=None, BEHAVIORAL_FOLDER=None, BOMBCELL=None):
         # SET #1: Path to the NWB file for this session (on the neural data computer)
     NWB_PATH = Path(fr"H:\NWB_OUT\{NWB_FILE}")
 
@@ -2520,3 +2729,147 @@ def setup_paths_and_verify(PROBES=['A', 'B', 'C', 'D', 'E', 'F'], NWB_FILE=None,
         print(f"Bombcell root folder: {BOMBCELL_ROOT_FOR_AUTO_BUILD}\n")
 
     return {'NWB_PATH': NWB_PATH, 'BOMBCELL_ROOT_FOR_AUTO_BUILD': BOMBCELL_ROOT_FOR_AUTO_BUILD, 'baseline_trials_index_path': baseline_trials_index_path, 'washout_trials_index_path': washout_trials_index_path, 'optoicalStim_trials_index_path': optoicalStim_trials_index_path, 'SESSION_NAME': SESSION_NAME, 'DATA_SAVE_DIR': DATA_SAVE_DIR}
+
+def _bundle_safe_name(value: Any) -> str:
+    s = str(value).strip()
+    if s == "":
+        return "bundle_latest"
+    s = re.sub(r'[\\/:*?"<>|]+', "_", s)
+    s = re.sub(r"\s+", "_", s)
+    s = re.sub(r"_+", "_", s).strip("._ ")
+    return s or "bundle_latest"
+
+def _infer_bundle_session_name(
+    *,
+    explicit_session_name: str | Path | None = None,
+    bombcell_root_for_auto_build: str | Path = "",
+    nwb_path_for_auto_build: str | Path = "",
+) -> str | None:
+    if explicit_session_name is not None and str(explicit_session_name).strip() != "":
+        return _bundle_safe_name(explicit_session_name)
+
+    bombcell_root = Path(str(bombcell_root_for_auto_build).strip()) if str(bombcell_root_for_auto_build).strip() != "" else None
+    if bombcell_root is not None:
+        parts = [p for p in bombcell_root.parts]
+        if "Kilosort_Recordings" in parts:
+            idx = parts.index("Kilosort_Recordings")
+            if idx + 1 < len(parts):
+                return _bundle_safe_name(parts[idx + 1])
+        if bombcell_root.parent.name:
+            return _bundle_safe_name(bombcell_root.parent.name)
+
+    nwb_path = Path(str(nwb_path_for_auto_build).strip()) if str(nwb_path_for_auto_build).strip() != "" else None
+    if nwb_path is not None:
+        if nwb_path.suffix:
+            return _bundle_safe_name(nwb_path.stem)
+        if nwb_path.name:
+            return _bundle_safe_name(nwb_path.name)
+
+    return None
+
+def resolve_processed_bundle_dir(
+    processed_bundle_dir: str | Path | None = None,
+    *,
+    session_name: str | Path | None = None,
+    nwb_path_for_auto_build: str | Path = "",
+    bombcell_root_for_auto_build: str | Path = "",
+) -> Path:
+    base = Path("processed_data") / "bundle_latest" if processed_bundle_dir is None else Path(processed_bundle_dir)
+    session_key = _infer_bundle_session_name(
+        explicit_session_name=session_name,
+        bombcell_root_for_auto_build=bombcell_root_for_auto_build,
+        nwb_path_for_auto_build=nwb_path_for_auto_build,
+    )
+    if session_key is None:
+        return base
+
+    if base.name == "bundle_latest":
+        return base.parent / session_key
+    return base
+    
+
+def setup_paths_and_verify(PROBES=['A', 'B', 'C', 'D', 'E', 'F'], NWB_FILE=None, NP_FILE=None, DATE=None, SESSION=None, BEHAVIORAL_FOLDER=None, BOMBCELL=None):
+        # SET #1: Path to the NWB file for this session (on the neural data computer)
+    NWB_PATH = Path(fr"H:\NWB_OUT\{NWB_FILE}")
+
+    # SET #2: Path to the bombcell root folder for this session (on the neural data computer)
+    BOMBCELL_ROOT_FOR_AUTO_BUILD = Path(fr"H:\Grant\Neuropixels\Kilosort_Recordings\{NP_FILE}\bombcell\{BOMBCELL}")
+
+    # SET #2: Validate bombcell root path and expected folder structure
+    for probes in PROBES:
+        expected_probe_folder = BOMBCELL_ROOT_FOR_AUTO_BUILD / f"kilosort4_{probes}"
+        if not expected_probe_folder.exists():
+            raise FileNotFoundError(
+                f"Expected to find bombcell data for probe {probes} at {expected_probe_folder}, but it does not exist. "
+                "Please check that BOMBCELL_ROOT_FOR_AUTO_BUILD is set correctly and that the folder structure matches the expected format."
+            )
+        else:
+            print(f"✅ Found bombcell data for probe {probes} at {expected_probe_folder}")
+
+    # SET #3 session name for labeling plots
+    SESSION_NAME = NP_FILE
+
+    # SET #4: Paths to trial index files (these are from the behavior video acquisition computer, not the neural data computer)
+    baseline_trials_index_path = rf"G:\Grant\behavior_data\DLC_net\{BEHAVIORAL_FOLDER}\videos\{DATE}\christielab\{SESSION}\{DATE}_christielab_{SESSION}_baseline_trial_numbers_tone2_aligned.npy"
+    washout_trials_index_path = rf"G:\Grant\behavior_data\DLC_net\{BEHAVIORAL_FOLDER}\videos\{DATE}\christielab\{SESSION}\{DATE}_christielab_{SESSION}_washout_trial_numbers_tone2_aligned.npy"
+    optoicalStim_trials_index_path = rf"G:\Grant\behavior_data\DLC_net\{BEHAVIORAL_FOLDER}\videos\{DATE}\christielab\{SESSION}\{DATE}_christielab_{SESSION}_stim_allowed_trial_numbers_tone2_aligned.npy"
+
+    CWD = Path.cwd().resolve()
+    DATA_SAVE_DIR = resolve_processed_bundle_dir(CWD / "processed_data" / "bundle_latest", session_name=NP_FILE).resolve()
+    DATA_SAVE_DIR.mkdir(parents=True, exist_ok=True)
+
+    print('\nCreating processed bundle directory if it does not exist...')
+    print("Kernel CWD:", CWD)
+    print("Processed bundle directory set to:", DATA_SAVE_DIR)
+    print("Exists now:", DATA_SAVE_DIR.exists())
+    print("Required files present:",
+        {fn: (DATA_SAVE_DIR / fn).exists() for fn in ("merged_dic.pkl", "stim_df.pkl", "pca_event_meta.pkl")})
+    print('\n')
+    if not DATA_SAVE_DIR.exists():
+        print(f"❌ Processed bundle directory not found at: {DATA_SAVE_DIR}")
+        raise FileNotFoundError("Processed bundle directory not found")
+    else:
+        print(f"✅ Processed bundle directory found at: {DATA_SAVE_DIR}")
+
+    # SET #5: Validate the NP session name and construct paths to data, with error handling
+    NP_ROOT_DIR = Path(r'H:\Grant\Neuropixels\Kilosort_Recordings') / SESSION_NAME
+    if not NP_ROOT_DIR.exists():
+        raise FileNotFoundError(
+            f"❌ Expected to find session data at {NP_ROOT_DIR}, but it does not exist. "
+            "Please check that SESSION_NAME is set correctly and that the folder structure matches the expected format."
+        )
+
+    if not os.path.exists(NP_ROOT_DIR):
+        print(f"❌ Session folder not found at: {NP_ROOT_DIR}")
+        raise FileNotFoundError("Session folder not found")
+    else:
+        print("\n✅ Neuropixel Session folder found")
+        print(f"Neuropixel Session folder: {NP_ROOT_DIR}\n")
+
+    if not os.path.exists(baseline_trials_index_path):
+        print(f"❌ Baseline trials index file not found at: {baseline_trials_index_path}")
+        raise FileNotFoundError("Baseline trials index file not found")
+    if not os.path.exists(washout_trials_index_path):
+        print(f"❌ Washout trials index file not found at: {washout_trials_index_path}")
+        raise FileNotFoundError("Washout trials index file not found")
+    if not os.path.exists(optoicalStim_trials_index_path):
+        print(f"❌ Optoical stim trials index file not found at: {optoicalStim_trials_index_path}")
+        raise FileNotFoundError("Optoical stim trials index file not found")
+    else:
+        print("✅ All behavior trial index files found")
+        print(f"Baseline trials index file: {baseline_trials_index_path}")
+        print(f"Washout trials index file: {washout_trials_index_path}")
+        print(f"Optoical stim trials index file: {optoicalStim_trials_index_path}\n")
+    #File existence checks
+    if not os.path.exists(NWB_PATH):
+        print(f"❌ NWB file not found at: {NWB_PATH}")
+        raise FileNotFoundError("NWB file not found")
+    if not os.path.exists(BOMBCELL_ROOT_FOR_AUTO_BUILD):
+        print(f"❌ Bombcell root folder not found at: {BOMBCELL_ROOT_FOR_AUTO_BUILD}")
+        raise FileNotFoundError("Bombcell root folder not found")
+    else:
+        print("✅ All NWB and Bombcell files found")
+        print(f"NWB file: {NWB_PATH}")
+        print(f"Bombcell root folder: {BOMBCELL_ROOT_FOR_AUTO_BUILD}\n")
+
+    return {'NP_ROOT_DIR': NP_ROOT_DIR, 'NWB_PATH': NWB_PATH, 'BOMBCELL_ROOT_FOR_AUTO_BUILD': BOMBCELL_ROOT_FOR_AUTO_BUILD, 'baseline_trials_index_path': baseline_trials_index_path, 'washout_trials_index_path': washout_trials_index_path, 'optoicalStim_trials_index_path': optoicalStim_trials_index_path, 'SESSION_NAME': SESSION_NAME, 'DATA_SAVE_DIR': DATA_SAVE_DIR}
