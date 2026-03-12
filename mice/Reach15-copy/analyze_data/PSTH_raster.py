@@ -24,17 +24,6 @@ DEFAULT_SPLIT_COLORS = {
     'no_optical_stim': 'red',
 }
 
-DEFAULT_REGION_BACKGROUND_COLORS = [
-    '#d8e7f2',
-    '#d6e8cf',
-    '#ead6ef',
-    '#f0d8cd',
-    '#d2e7e0',
-    '#f0d6dc',
-    '#ddd6b2',
-    '#d9dff2',
-]
-
 SPECIAL_UNSPLIT_EVENTS = {
     'first_opto_tagging_timestamp_per_trial',
     'first_optical_pulse_per_closed_loop',
@@ -106,15 +95,6 @@ def _region_column(df_units):
     return None
 
 
-def _normalize_region_value(value):
-    if pd.isna(value):
-        return 'unknown_region'
-    text = str(value).strip()
-    if text in {'', 'None', 'nan'}:
-        return 'unknown_region'
-    return text
-
-
 def _unit_label_column(df_units, *, use_label=False, use_kslabel=False, kslabel_value=None):
     if use_label and 'label' in df_units.columns:
         return 'label', 2
@@ -125,33 +105,6 @@ def _unit_label_column(df_units, *, use_label=False, use_kslabel=False, kslabel_
     return None, None
 
 
-def _bombcell_good_mask(df_units):
-    if 'bc_unitType' in df_units.columns:
-        values = df_units['bc_unitType'].fillna('').astype(str).str.strip().str.upper()
-        reject = values.isin({'', 'NONE', 'NAN', 'NOISE', 'NON-SOMA', 'NON SOMA'})
-        accept = values.eq('SOMA') | values.str.contains('GOOD', na=False)
-        if accept.any():
-            return accept & ~reject
-        return ~reject
-
-    if 'bc_label' in df_units.columns:
-        values = df_units['bc_label'].fillna('').astype(str).str.strip().str.upper()
-        reject = (
-            values.eq('')
-            | values.eq('NONE')
-            | values.eq('NAN')
-            | values.str.startswith('NOISE')
-            | values.str.startswith('NON-SOMA')
-            | values.str.startswith('NON SOMA')
-        )
-        accept = values.str.startswith('SOMA') | values.str.startswith('GOOD')
-        if accept.any():
-            return accept & ~reject
-        return ~reject
-
-    raise ValueError('bombcell_label=True requires bc_unitType or bc_label column.')
-
-
 def _select_units(
     df_units,
     *,
@@ -159,7 +112,6 @@ def _select_units(
     brain_region=None,
     label=False,
     KSlabel=False,
-    bombcell_label=False,
     KSlabel_good=False,
     kslabel_mua=False,
     all_units=True,
@@ -172,7 +124,7 @@ def _select_units(
     if brain_region is not None and region_col is not None:
         df1 = df1[df1[region_col].astype(str) == str(brain_region)]
 
-    filter_flags = [bool(label), bool(KSlabel), bool(bombcell_label), bool(KSlabel_good), bool(kslabel_mua)]
+    filter_flags = [bool(label), bool(KSlabel), bool(KSlabel_good), bool(kslabel_mua)]
     if sum(filter_flags) > 1:
         raise ValueError('Use only one unit-quality filter at a time.')
 
@@ -187,143 +139,11 @@ def _select_units(
 
     if col is not None:
         df1 = df1[pd.to_numeric(df1[col], errors='coerce') == target]
-    elif bombcell_label:
-        df1 = df1[_bombcell_good_mask(df1)]
 
     if not all_units and col is None:
         df1 = df1.copy()
 
     return df1.reset_index(drop=True)
-
-
-def select_units(
-    df_units,
-    *,
-    probeLetter=None,
-    brain_region=None,
-    label=False,
-    KSlabel=False,
-    bombcell_label=False,
-    KSlabel_good=False,
-    kslabel_mua=False,
-    all_units=True,
-):
-    return _select_units(
-        df_units,
-        probeLetter=probeLetter,
-        brain_region=brain_region,
-        label=label,
-        KSlabel=KSlabel,
-        bombcell_label=bombcell_label,
-        KSlabel_good=KSlabel_good,
-        kslabel_mua=kslabel_mua,
-        all_units=all_units,
-    )
-
-
-def split_units_by_probe_and_region(
-    df_units,
-    *,
-    probes=None,
-    label=False,
-    KSlabel=False,
-    bombcell_label=False,
-    KSlabel_good=False,
-    kslabel_mua=False,
-    include_unknown=True,
-):
-    df1 = _select_units(
-        df_units,
-        label=label,
-        KSlabel=KSlabel,
-        bombcell_label=bombcell_label,
-        KSlabel_good=KSlabel_good,
-        kslabel_mua=kslabel_mua,
-    )
-    if df1.empty:
-        return []
-
-    if probes is not None and 'probe' in df1.columns:
-        probe_set = {str(probe) for probe in probes}
-        df1 = df1[df1['probe'].astype(str).isin(probe_set)].copy()
-    if df1.empty:
-        return []
-
-    region_col = _region_column(df1)
-    grouped = df1.copy()
-    if region_col is None:
-        grouped['_plot_region'] = 'unknown_region'
-    else:
-        grouped['_plot_region'] = grouped[region_col].map(_normalize_region_value)
-
-    if 'probe' in grouped.columns:
-        probe_values = grouped['probe'].fillna('unknown_probe').astype(str)
-    else:
-        probe_values = pd.Series(['unknown_probe'] * len(grouped), index=grouped.index, dtype='object')
-    grouped['_plot_probe'] = probe_values
-
-    out = []
-    for probe in sorted(grouped['_plot_probe'].dropna().astype(str).unique().tolist()):
-        probe_df = grouped[grouped['_plot_probe'] == probe].copy()
-        region_labels = probe_df['_plot_region'].dropna().astype(str).unique().tolist()
-        for region_label in region_labels:
-            if region_label == 'unknown_region' and not include_unknown:
-                continue
-            region_df = probe_df[probe_df['_plot_region'] == region_label].copy()
-            region_df = region_df.drop(columns=['_plot_region', '_plot_probe']).reset_index(drop=True)
-            out.append({
-                'probe': probe,
-                'brain_region': None if region_label == 'unknown_region' else region_label,
-                'region_label': region_label,
-                'region_safe': region_label.replace('/', '_').replace('\\', '_').replace(' ', '_'),
-                'df_units': region_df,
-            })
-    return out
-
-
-def batch_run_by_probe_and_region(
-    df_units,
-    plot_func,
-    *,
-    save_dir=None,
-    probes=None,
-    label=False,
-    KSlabel=False,
-    bombcell_label=False,
-    KSlabel_good=False,
-    kslabel_mua=False,
-    units_per_group=None,
-    include_unknown=True,
-    **plot_kwargs,
-):
-    groups = split_units_by_probe_and_region(
-        df_units,
-        probes=probes,
-        label=label,
-        KSlabel=KSlabel,
-        bombcell_label=bombcell_label,
-        KSlabel_good=KSlabel_good,
-        kslabel_mua=kslabel_mua,
-        include_unknown=include_unknown,
-    )
-    results = {}
-    for group in groups:
-        group_df = group['df_units']
-        if units_per_group is not None:
-            group_df = group_df.head(int(units_per_group)).copy()
-        if group_df.empty:
-            continue
-
-        group_key = f"probe{group['probe']}_{group['region_safe']}"
-        group_save_dir = Path(save_dir) / group_key if save_dir is not None else None
-        results[group_key] = plot_func(
-            df_units=group_df,
-            probeLetter=group['probe'],
-            brain_region=group['brain_region'],
-            save_dir=group_save_dir,
-            **plot_kwargs,
-        )
-    return results
 
 
 def _iter_unit_ids(df_units, selected_units=None):
@@ -387,9 +207,9 @@ def _save_figure(fig, save_dir, filename):
 def _unit_region(row):
     for key in ['Brain_Region', 'brain_region']:
         if key in row.index:
-            value = _normalize_region_value(row.get(key))
-            if value != 'unknown_region':
-                return value
+            value = row.get(key)
+            if pd.notna(value) and str(value).strip() not in {'', 'None', 'nan'}:
+                return str(value)
     return 'unknown_region'
 
 
@@ -559,7 +379,7 @@ def _segment_event_indices(trail_indices, gap_threshold=5):
 def _multi_event_columns(fig_cols):
     if fig_cols <= 0:
         raise ValueError('At least one event column is required.')
-    return plt.subplots(2, fig_cols, figsize=(7.25 * fig_cols, 10.5), squeeze=False, sharex='col')
+    return plt.subplots(2, fig_cols, figsize=(6 * fig_cols, 9), squeeze=False, sharex='col')
 
 
 def _heatmap_rows(df_probe, unit_ids, event_times, pre, post, bin_size, normalize_fr=False, max_fr=60, smoothing_sigma=None):
@@ -1700,40 +1520,6 @@ def singleUnit_psth_raster_epoch_gradient(df_units, probeLetter, cluster_id, eve
     return fig, ax
 
 
-def allUnits_psth_raster_epoch_gradient(df_units, probeLetter, brain_region, event_times, event_name=None, event_meta=None, epoch_event_times_map=None, epoch_column='condition_epoch', label=False, KSlabel=False, pre=0.5, post=1, bin_size=0.01, save_dir=None, var_bars=True, smooth=True, smooth_window=5, show_data_in_title=True):
-    df1 = _select_units(
-        df_units,
-        probeLetter=probeLetter,
-        brain_region=brain_region,
-        label=label,
-        KSlabel=KSlabel,
-    )
-    saved_paths = []
-    for unit_id in _iter_unit_ids(df1):
-        fig, ax = singleUnit_psth_raster_epoch_gradient(
-            df_units=df1,
-            probeLetter=probeLetter,
-            cluster_id=int(unit_id),
-            event_times=event_times,
-            event_name=event_name,
-            event_meta=event_meta,
-            epoch_event_times_map=epoch_event_times_map,
-            epoch_column=epoch_column,
-            pre=pre,
-            post=post,
-            smooth=smooth,
-            var_bars=var_bars,
-            smooth_window=smooth_window,
-            show_data_in_title=show_data_in_title,
-        )
-        row = _find_unit_row(df1, unit_id)
-        region = _unit_region(row)
-        saved_paths.append(_save_figure(fig, save_dir, f'clusterID_{int(unit_id)}_probe{probeLetter}_{region}.png'))
-        if save_dir is not None:
-            plt.close(fig)
-    return saved_paths
-
-
 def allUnits_psth_raster_2(df_units, df_stim, brain_region=None, title_name='Not Set', event_times=None, label=False, KSlabel=False, all_units=True, dot_size=0.5, pre=0.5, post=1, bin_size=0.05, epoch1='pellet_delivery_timestamp', probeLetter=None, save_dir=None, var_bars=True):
     event_times = _resolve_event_times(event_times=event_times, df_stim=df_stim, epoch1=epoch1)
     df1 = _select_units(df_units, probeLetter=probeLetter, brain_region=brain_region, label=label, KSlabel=KSlabel, all_units=all_units)
@@ -2007,7 +1793,7 @@ def allUnits_psth_raster_figures(df_units, df_stim, probeLetter, brain_region, l
 def multiRegion_raster_figures(df_units, df_stim, brain_regions, probe_units, probe_letters=['A', 'B', 'C', 'D'], label=False, KSlabel=False, pre=0.5, post=1, binSizeRaster=0.05, epoch1='pellet_delivery_timestamp', save_dir=None, highlight_time_zero=False, dot_size=0.12, background_colors=None):
     event_times = _resolve_event_times(df_stim=df_stim, epoch1=epoch1)
     if background_colors is None:
-        background_colors = DEFAULT_REGION_BACKGROUND_COLORS
+        background_colors = ['#f0f8ff', '#fafad2', '#e6e6fa', '#fff0f5', '#d1e7dd', '#f5f5dc']
     fig, axs = plt.subplots(len(probe_letters), 1, figsize=(14, max(3.5, len(probe_letters)) * 3.2), sharex=True)
     axs = np.atleast_1d(axs)
     fig.suptitle(f'Aligned to {epoch1}; Units {probe_units}')
@@ -2033,7 +1819,7 @@ def multiRegion_raster_figures(df_units, df_stim, brain_regions, probe_units, pr
 
 def _multi_region_raster_psth_common(df_units, event_times, brain_regions, probe_units, probe_letters, label, KSlabel, pre, post, binSizeRaster, binSizePSTH, save_dir, highlight_time_zero, normalize_psth, dot_size, background_colors, title):
     if background_colors is None:
-        background_colors = DEFAULT_REGION_BACKGROUND_COLORS
+        background_colors = ['#f0f8ff', '#fafad2', '#e6e6fa', '#fff0f5', '#d1e7dd', '#f5f5dc']
     fig, axs = plt.subplots(len(probe_letters) + 1, 1, figsize=(16, max(4, len(probe_letters) + 1) * 3.2), sharex=True)
     axs = np.atleast_1d(axs)
     psth_ax = axs[0]
@@ -2167,21 +1953,13 @@ def sorted_heatmap(df_units, df_stim, probeLetter, selected_units=None, pre=0.5,
     return fig, ax, saved
 
 
-def multi_probe_units_heatmap(df_units, df_stim, probes, selected_units=None, selected_units_by_subplot=None, times_of_events=None, event_name=None, brain_regions=None, brain_region_filters=None, pre=0.5, post=1, bin_size=0.01, epoch1='pellet_detected_timestamp', label=False, KSlabel=True, save_dir=None, max_fr=60, show_unit_labels=True, normalize_fr=False):
+def multi_probe_units_heatmap(df_units, df_stim, probes, selected_units, times_of_events=None, event_name=None, brain_regions=None, pre=0.5, post=1, bin_size=0.01, epoch1='pellet_detected_timestamp', label=False, KSlabel=True, save_dir=None, max_fr=60, show_unit_labels=True, normalize_fr=False):
     event_times = _resolve_event_times(event_times=times_of_events, df_stim=df_stim, epoch1=epoch1)
     fig, axes = plt.subplots(len(probes), 1, figsize=(22, max(4, len(probes) * 4.8)), squeeze=False)
     axes = axes.flatten()
     for idx, probeLetter in enumerate(probes):
-        region_filter = None
-        if brain_region_filters is not None:
-            region_filter = brain_region_filters[idx]
-        df_probe = _select_units(df_units, probeLetter=probeLetter, brain_region=region_filter, label=label, KSlabel=KSlabel)
-        if selected_units_by_subplot is not None:
-            unit_ids = _iter_unit_ids(df_probe, selected_units=selected_units_by_subplot[idx])
-        elif selected_units is not None:
-            unit_ids = _iter_unit_ids(df_probe, selected_units=selected_units.get(probeLetter))
-        else:
-            unit_ids = _iter_unit_ids(df_probe)
+        df_probe = _select_units(df_units, probeLetter=probeLetter, label=label, KSlabel=KSlabel)
+        unit_ids = _iter_unit_ids(df_probe, selected_units=selected_units.get(probeLetter))
         heatmap_data, labels, _ = _heatmap_rows(df_probe, unit_ids, event_times, abs(pre), abs(post), bin_size, normalize_fr=normalize_fr, max_fr=max_fr)
         ax = axes[idx]
         if heatmap_data.size == 0:
@@ -2189,10 +1967,10 @@ def multi_probe_units_heatmap(df_units, df_stim, probes, selected_units=None, se
             continue
         vmin, vmax = (-2, 2) if normalize_fr else (0, max_fr)
         sns.heatmap(heatmap_data, cmap='RdBu_r' if normalize_fr else 'jet', ax=ax, cbar=True, xticklabels=False, yticklabels=labels if show_unit_labels else False, vmin=vmin, vmax=vmax, cbar_kws={'shrink': 0.6})
-        label_text = brain_regions[idx] if brain_regions else (region_filter if region_filter is not None else probeLetter)
+        label_text = brain_regions[idx] if brain_regions else probeLetter
         ax.set_ylabel(label_text, rotation=0, labelpad=30, va='center')
         ax.set_xlabel('Time (s)')
-        ax.set_title(f'Probe {probeLetter} | {label_text}')
+        ax.set_title(f'Probe {probeLetter}')
     fig.suptitle(f'Aligned to {event_name or epoch1}')
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     saved = _save_figure(fig, save_dir, f'multi_probe_heatmap_{event_name or epoch1}_{abs(pre)}_{abs(post)}.png')
@@ -2201,15 +1979,12 @@ def multi_probe_units_heatmap(df_units, df_stim, probes, selected_units=None, se
     return fig, axes, saved
 
 
-def multi_probe_units_heatmap_smoothed(df_units, df_stim, probes, selected_units=None, selected_units_by_subplot=None, times_of_events=None, event_name=None, brain_regions=None, brain_region_filters=None, pre=0.5, post=1, bin_size=0.01, epoch1='pellet_detected_timestamp', label=False, KSlabel=True, save_dir=None, max_fr=60, show_unit_labels=True, normalize_fr=False, sort_by_time=True, reset_unit_count=False, smoothing_window=1):
+def multi_probe_units_heatmap_smoothed(df_units, df_stim, probes, selected_units=None, selected_units_by_subplot=None, times_of_events=None, event_name=None, brain_regions=None, pre=0.5, post=1, bin_size=0.01, epoch1='pellet_detected_timestamp', label=False, KSlabel=True, save_dir=None, max_fr=60, show_unit_labels=True, normalize_fr=False, sort_by_time=True, reset_unit_count=False, smoothing_window=1):
     event_times = _resolve_event_times(event_times=times_of_events, df_stim=df_stim, epoch1=epoch1)
     fig, axes = plt.subplots(len(probes), 1, figsize=(22, max(4, len(probes) * 4.8)), squeeze=False)
     axes = axes.flatten()
     for idx, probeLetter in enumerate(probes):
-        region_filter = None
-        if brain_region_filters is not None:
-            region_filter = brain_region_filters[idx]
-        df_probe = _select_units(df_units, probeLetter=probeLetter, brain_region=region_filter, label=label, KSlabel=KSlabel)
+        df_probe = _select_units(df_units, probeLetter=probeLetter, label=label, KSlabel=KSlabel)
         if selected_units_by_subplot is not None:
             unit_ids = _iter_unit_ids(df_probe, selected_units=selected_units_by_subplot[idx])
         elif selected_units is not None:
@@ -2227,10 +2002,10 @@ def multi_probe_units_heatmap_smoothed(df_units, df_stim, probes, selected_units
         y_labels = np.arange(1, len(sorted_labels) + 1) if reset_unit_count else sorted_labels
         vmin, vmax = (-2, 2) if normalize_fr else (0, max_fr)
         sns.heatmap(sorted_heat, cmap='RdBu_r' if normalize_fr else 'jet', ax=ax, cbar=True, xticklabels=False, yticklabels=y_labels if show_unit_labels else False, vmin=vmin, vmax=vmax, cbar_kws={'shrink': 0.6})
-        label_text = brain_regions[idx] if brain_regions else (region_filter if region_filter is not None else probeLetter)
+        label_text = brain_regions[idx] if brain_regions else probeLetter
         ax.set_ylabel(label_text, rotation=0, labelpad=30, va='center')
         ax.set_xlabel('Time (s)')
-        ax.set_title(f'Probe {probeLetter} | {label_text}')
+        ax.set_title(f'Probe {probeLetter}')
     fig.suptitle(f'Aligned to {event_name or epoch1}')
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     saved = _save_figure(fig, save_dir, f'multi_probe_heatmap_smoothed_{event_name or epoch1}_{abs(pre)}_{abs(post)}.png')
@@ -2241,9 +2016,6 @@ def multi_probe_units_heatmap_smoothed(df_units, df_stim, probes, selected_units
 
 __all__ = [
     'combine_merged_units',
-    'select_units',
-    'split_units_by_probe_and_region',
-    'batch_run_by_probe_and_region',
     'flatten_nested_trial_numbers',
     'build_trial_index_groups',
     'build_event_name_subplots',
@@ -2255,7 +2027,6 @@ __all__ = [
     'singleUnit_psth_raster_subplots_stim_seperated',
     'singleUnit_psth_raster_epoch_stacked',
     'singleUnit_psth_raster_epoch_gradient',
-    'allUnits_psth_raster_epoch_gradient',
     'allUnits_psth_raster_2',
     'psth_raster_stim_seperated_baseline',
     'psth_raster_stim_seperated',

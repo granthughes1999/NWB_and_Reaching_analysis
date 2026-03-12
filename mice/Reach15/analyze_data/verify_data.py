@@ -232,6 +232,7 @@ def plot_task_epoch_structure(
     *,
     trials_are_one_based=True,
     figsize=(14, 3),
+    save_plot_path=None,
 ):
     """
     Plot trial order structure.
@@ -292,7 +293,7 @@ def plot_task_epoch_structure(
     ax.set_yticks([1, 2, 3])
     ax.set_yticklabels(['Baseline', 'Stimulation', 'Washout'])
     ax.set_xlabel('Trial Number')
-    ax.set_title('Task Epoch Order Structure')
+    ax.set_title('Expected trial structure across baseline, stimulation, and washout epochs: \n Refered to as condition_epoch')
     ax.legend(loc='upper right')
     ax.grid(alpha=0.3)
 
@@ -306,6 +307,11 @@ def plot_task_epoch_structure(
         ax.set_xlim(min(all_trials) - 2, max(all_trials) + 2)
 
     plt.tight_layout()
+    if save_plot_path is not None:
+        if save_plot_path.parent is not None:
+            save_plot_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(save_plot_path)
+        print(f"Saved trial structure plot to: {save_plot_path}")
     plt.show()
 
 
@@ -820,7 +826,7 @@ def _plot_event_source_vs_label(
         )
 
     y_ticks = [source_y] + [label_y[label] for label in label_order]
-    y_labels = [f"EVENT_TIME_ALIGN_TO: {source_name}"] + label_order
+    y_labels = [f"event time aligned to: {expected_condition}"] + label_order
     ax.set_yticks(y_ticks)
     ax.set_yticklabels(y_labels)
 
@@ -857,6 +863,8 @@ def _plot_event_source_vs_label(
 
     plt.tight_layout()
     if save_plot_path is not None:
+        if save_plot_path.parent is not None:
+            save_plot_path.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(save_plot_path, dpi=220, bbox_inches="tight")
     plt.show()
 
@@ -1239,6 +1247,8 @@ def plot_real_condition_vs_condition_epoch(
 
     plt.tight_layout()
     if save_plot_path is not None:
+        if save_plot_path.parent is not None:
+                save_plot_path.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(save_plot_path, dpi=220, bbox_inches="tight")
     plt.show()
 
@@ -1262,7 +1272,7 @@ def plot_event_time_align_to_vs_real_condition(
         start_time_source_col=start_time_source_col,
         figsize=figsize,
         save_plot_path=save_plot_path,
-        title_prefix="EVENT_TIME_ALIGN_TO vs Real Condition",
+        title_prefix=f"Actual trial by trial structure \n Refered to as real_condition_epoch",
     )
 
 
@@ -1286,5 +1296,5 @@ def plot_event_time_align_to_vs_condition_epoch(
         start_time_source_col=start_time_source_col,
         figsize=figsize,
         save_plot_path=save_plot_path,
-        title_prefix="EVENT_TIME_ALIGN_TO vs Condition Epoch",
+        title_prefix="Expected trial structure across baseline, stimulation, and washout epochs: \n Refered to as condition_epoch",
     )
