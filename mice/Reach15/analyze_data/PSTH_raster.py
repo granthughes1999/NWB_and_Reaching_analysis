@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Shared PSTH/raster helpers extracted from 03_psth_raster_NWB_testing.ipynb."""
 
+import gc
 from colorsys import hls_to_rgb, rgb_to_hls
 from pathlib import Path
 
@@ -294,6 +295,8 @@ def batch_run_by_probe_and_region(
     kslabel_mua=False,
     units_per_group=None,
     include_unknown=True,
+    cleanup_between_groups=None,
+    skip_existing_save_dir=True,
     **plot_kwargs,
 ):
     groups = split_units_by_probe_and_region(
@@ -306,6 +309,9 @@ def batch_run_by_probe_and_region(
         kslabel_mua=kslabel_mua,
         include_unknown=include_unknown,
     )
+    if cleanup_between_groups is None:
+        cleanup_between_groups = save_dir is not None
+
     results = {}
     for group in groups:
         group_df = group['df_units']
@@ -316,13 +322,24 @@ def batch_run_by_probe_and_region(
 
         group_key = f"probe{group['probe']}_{group['region_safe']}"
         group_save_dir = Path(save_dir) / group_key if save_dir is not None else None
-        results[group_key] = plot_func(
-            df_units=group_df,
-            probeLetter=group['probe'],
-            brain_region=group['brain_region'],
-            save_dir=group_save_dir,
-            **plot_kwargs,
-        )
+        if skip_existing_save_dir and group_save_dir is not None and group_save_dir.exists():
+            print(f"Skipping {group_key}: save dir already exists at {group_save_dir}")
+            if cleanup_between_groups:
+                plt.close('all')
+                gc.collect()
+            continue
+        try:
+            results[group_key] = plot_func(
+                df_units=group_df,
+                probeLetter=group['probe'],
+                brain_region=group['brain_region'],
+                save_dir=group_save_dir,
+                **plot_kwargs,
+            )
+        finally:
+            if cleanup_between_groups:
+                plt.close('all')
+                gc.collect()
     return results
 
 
@@ -380,8 +397,19 @@ def _save_figure(fig, save_dir, filename):
     if save_path is None:
         return None
     full_path = save_path / filename
-    fig.savefig(full_path, bbox_inches='tight')
+    use_tight_bbox = fig.get_figwidth() < 18 and len(fig.axes) <= 4
+    fig.savefig(full_path, bbox_inches='tight' if use_tight_bbox else None)
     return full_path
+
+
+def _release_figure(fig):
+    if fig is None:
+        return
+    try:
+        fig.clf()
+    finally:
+        plt.close(fig)
+        gc.collect()
 
 
 def _unit_region(row):
@@ -496,7 +524,13 @@ def _legend_outside(ax, handles, *, loc='center left', bbox_to_anchor=(1.02, 0.5
 
 def _tight_layout_figure(fig, *, top=0.95, reserve_right=False):
     right = 0.8 if reserve_right else 1.0
-    fig.tight_layout(rect=[0, 0, right, top])
+    if fig.get_figwidth() >= 18 or len(fig.axes) > 4:
+        fig.subplots_adjust(left=0.06, bottom=0.06, right=right, top=top, wspace=0.28, hspace=0.32)
+        return
+    try:
+        fig.tight_layout(rect=[0, 0, right, top])
+    except MemoryError:
+        fig.subplots_adjust(left=0.06, bottom=0.06, right=right, top=top, wspace=0.28, hspace=0.32)
 
 
 def _labeled_line_patches(ax):
@@ -519,7 +553,26 @@ def _plot_raster_points(ax, spike_times, event_times, pre, post, color='black', 
     return max_y
 
 
-def _plot_grouped_overlay(ax_psth, ax_raster, spike_times, event_times, trail_indices, pre, post, bin_size, color_mapping=None,var_bars=True, dot_size=4):
+def _grouped_overlay_legend_handles(trail_indices, color_mapping=None):
+    colors = DEFAULT_SPLIT_COLORS.copy()
+    if color_mapping:
+        colors.update(color_mapping)
+
+    handles = []
+    for trial_type, indices in trail_indices.items():
+        valid = np.asarray(indices, dtype=int).ravel()
+        if valid.size == 0:
+            continue
+        handles.append(
+            mpatches.Patch(
+                color=colors.get(trial_type, 'gray'),
+                label=str(trial_type).replace('_', ' '),
+            )
+        )
+    return handles
+
+
+def _plot_grouped_overlay(ax_psth, ax_raster, spike_times, event_times, trail_indices, pre, post, bin_size, color_mapping=None,var_bars=True, dot_size=4, show_legend=True):
     colors = DEFAULT_SPLIT_COLORS.copy()
     if color_mapping:
         colors.update(color_mapping)
@@ -536,7 +589,7 @@ def _plot_grouped_overlay(ax_psth, ax_raster, spike_times, event_times, trail_in
         _plot_psth(ax_psth, edges, psth, var, mean_baseline, color=color, smooth=True, var_bars=var_bars,smooth_window=5)
         legend_items.append(mpatches.Patch(color=color, label=f'{trial_type} (n={len(valid)})'))
         max_y = max(max_y, _plot_raster_points(ax_raster, spike_times, plot_times, pre, post, color=color, dot_size=dot_size, y_values=valid))
-    if legend_items:
+    if show_legend and legend_items:
         _legend_outside(ax_psth, legend_items)
     return max_y
 
@@ -556,10 +609,10 @@ def _segment_event_indices(trail_indices, gap_threshold=5):
     return segments
 
 
-def _multi_event_columns(fig_cols):
+def _multi_event_columns(fig_cols, *, width_per_col=7.25, fig_height=10.5):
     if fig_cols <= 0:
         raise ValueError('At least one event column is required.')
-    return plt.subplots(2, fig_cols, figsize=(7.25 * fig_cols, 10.5), squeeze=False, sharex='col')
+    return plt.subplots(2, fig_cols, figsize=(width_per_col * fig_cols, fig_height), squeeze=False, sharex='col')
 
 
 def _heatmap_rows(df_probe, unit_ids, event_times, pre, post, bin_size, normalize_fr=False, max_fr=60, smoothing_sigma=None):
@@ -1180,7 +1233,7 @@ def singleUnit_psth_raster_subplots(df_units, probeLetter, cluster_id, event_nam
     return fig, ax
 
 
-def singleUnit_psth_raster_subplots_stim_seperated(df_units, probeLetter, cluster_id, event_name_subplots=None, trail_indices=None, pre=None, post=None, bin_size=0.01, event_names=None, namespace=None, smooth=True, var_bars=True, smooth_window=5, show_data_in_title=True, save_figure=False, output_root=None, event_times_subplots=None):
+def singleUnit_psth_raster_subplots_stim_seperated(df_units, probeLetter, cluster_id, event_name_subplots=None, trail_indices=None, pre=None, post=None, bin_size=0.01, event_names=None, namespace=None, smooth=True, var_bars=True, smooth_window=5, show_data_in_title=True, save_figure=False, output_root=None, event_times_subplots=None, save_dir=None):
     if trail_indices is None:
         raise ValueError('trail_indices is required for baseline/stimulation/washout separation.')
 
@@ -1385,11 +1438,173 @@ def singleUnit_psth_raster_subplots_stim_seperated(df_units, probeLetter, cluste
     fig.suptitle('\n'.join(suptitle_lines))
     plt.tight_layout(rect=[0, 0, 1, 0.94])
 
-    if save_figure:
-        if output_root is None:
-            output_root = Path.cwd().resolve() / 'processed_data' / 'psth_raster_output'
+    # if save_figure:
+    #     if output_root is None:
+    #         output_root = Path.cwd().resolve() / 'processed_data' / 'psth_raster_output'
 
-        fig_filename = Path(output_root) / 'singleUnit_psth_raster_subplots_stim_seperated' / f"probe{probeLetter}_{metadata['brain_region_safe']}" / f"clusterID_{int(cluster_id)}_probe{probeLetter}_{metadata['brain_region_safe']}.png"
+    #     fig_filename = Path(output_root) / 'singleUnit_psth_raster_subplots_stim_seperated' / f"probe{probeLetter}_{metadata['brain_region_safe']}" / f"clusterID_{int(cluster_id)}_probe{probeLetter}_{metadata['brain_region_safe']}.png"
+    #     fig_filename.parent.mkdir(parents=True, exist_ok=True)
+    #     fig.savefig(fig_filename, bbox_inches='tight')
+
+    if save_dir is not None:
+        fig_filename = Path(save_dir) / f"singleUnit_psth_raster_subplots_stim_seperated_probe{probeLetter}_clusterID_{int(cluster_id)}.png"
+        fig_filename.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(fig_filename, bbox_inches='tight')
+
+    return fig, ax
+
+
+def singleUnit_psth_raster_all_events_seperated(df_units, probeLetter, cluster_id, variables, trail_indices, pre, post, bin_size=0.01, namespace=None, smooth=True, var_bars=True, smooth_window=5, show_data_in_title=True, dot_size=0.5, save_dir=None):
+    if not variables:
+        raise ValueError('variables is required.')
+    if trail_indices is None:
+        raise ValueError('trail_indices is required.')
+    if namespace is None:
+        namespace = globals()
+
+    metadata = _collect_unit_plot_metadata(df_units, probeLetter, cluster_id)
+    spike_times = metadata['spike_times']
+
+    event_entries = []
+    for idx, (event_label, event_source) in enumerate(variables.items()):
+        event_times, resolved_label = _resolve_event_source(event_source, namespace, f'event_times_{idx + 1}')
+        event_entries.append({
+            'event_label': str(event_label) if isinstance(event_label, str) else resolved_label,
+            'event_times': np.asarray(event_times, dtype=float),
+        })
+
+    fig, ax = _multi_event_columns(len(event_entries), width_per_col=8.5, fig_height=12.0)
+    legend_handles = _grouped_overlay_legend_handles(trail_indices)
+    all_summaries = []
+    total_events = 0
+    phase_trial_counts = {key: 0 for key in trail_indices.keys()}
+
+    for col, event_entry in enumerate(event_entries):
+        event_label = event_entry['event_label']
+        event_times = event_entry['event_times']
+        total_events += int(len(event_times))
+
+        ax[0, col].axvline(0, color='k', linestyle='--', linewidth=0.8, alpha=0.5)
+        ax[1, col].axvline(0, color='k', linestyle='--', linewidth=0.8, alpha=0.5)
+        ax[0, col].set_xlim(-abs(pre), abs(post))
+        ax[1, col].set_xlim(-abs(pre), abs(post))
+        ax[0, col].set_ylabel('Firing Rate [Hz]')
+        ax[1, col].set_ylabel('Trial')
+        ax[1, col].set_xlabel('Time [s]')
+
+        if len(event_times) == 0:
+            ax[0, col].set_title('\n'.join([event_label, 'no events']))
+            ax[1, col].set_title('\n'.join([event_label, 'Raster Plot', 'no events']))
+            continue
+
+        event_summaries = []
+        trial_count_parts = []
+        max_y = -1
+        for trial_type, indices in trail_indices.items():
+            valid = _valid_indices(indices, len(event_times))
+            phase_trial_counts[trial_type] = phase_trial_counts.get(trial_type, 0) + int(len(valid))
+            trial_count_parts.append(f'{trial_type}: {len(valid)}')
+            if len(valid) == 0:
+                continue
+
+            plot_times = event_times[valid]
+            psth, var, edges, bytrial = trial_by_trial(spike_times, plot_times, abs(pre), abs(post), bin_size)
+            stats = _summarize_trial_response(psth, edges, bytrial, abs(pre), bin_size)
+            stats['n_events'] = int(len(plot_times))
+            stats['trial_type'] = str(trial_type)
+            event_summaries.append(stats)
+            all_summaries.append(stats)
+
+            color = DEFAULT_SPLIT_COLORS.get(trial_type, 'gray')
+            _plot_psth(
+                ax[0, col],
+                edges,
+                psth,
+                var,
+                stats['mean_baseline'],
+                color=color,
+                smooth=smooth,
+                var_bars=var_bars,
+                smooth_window=smooth_window,
+            )
+            max_y = max(
+                max_y,
+                _plot_raster_points(
+                    ax[1, col],
+                    spike_times,
+                    plot_times,
+                    abs(pre),
+                    abs(post),
+                    color=color,
+                    dot_size=max(0.5, dot_size * 6),
+                    y_values=valid,
+                ),
+            )
+
+        title_lines = [event_label]
+        if show_data_in_title:
+            title_lines.append(_join_title_parts([
+                f'total_events: {len(event_times)}',
+                f'trial_groups: {len(event_summaries)}',
+            ]))
+            if trial_count_parts:
+                title_lines.append(_join_title_parts(trial_count_parts))
+            aggregate = _aggregate_summary(event_summaries)
+            if aggregate:
+                title_lines.append(_join_title_parts([
+                    f"mean_response(avg): {_format_float(aggregate['mean_response_mean'])}",
+                    f"delta_mean(avg): {_format_float(aggregate['delta_mean_mean'])}",
+                    f"trials_zMean(avg): {_format_float(aggregate['trial_z_mean_mean'])}",
+                    f"peak_delta(max): {_format_float(aggregate['peak_delta_hz_max'])} Hz",
+                ]))
+        ax[0, col].set_title('\n'.join(title_lines))
+
+        raster_title_lines = [
+            event_label,
+            'Raster Plot',
+            _join_title_parts([f'total_events: {len(event_times)}'] + trial_count_parts),
+        ]
+        ax[1, col].set_title('\n'.join(raster_title_lines))
+        if max_y >= 0:
+            ax[1, col].set_ylim(-1, max_y + 1)
+
+    if legend_handles:
+        fig.legend(
+            handles=legend_handles,
+            loc='center left',
+            bbox_to_anchor=(0.82, 0.5),
+            frameon=False,
+            title='Trial group',
+        )
+
+    aggregate = _aggregate_summary(all_summaries)
+    suptitle_lines = _build_unit_header_lines(
+        metadata,
+        pre,
+        post,
+        bin_size,
+        extra_parts=[
+            f'event_sets: {len(event_entries)}',
+            f'total_events: {total_events}',
+            f"smooth: {'yes' if smooth else 'no'}",
+            f'smooth_window: {smooth_window}',
+            f'var_bars: {"yes" if var_bars else "no"}',
+        ],
+    )
+    if phase_trial_counts:
+        suptitle_lines.append(_join_title_parts([f'{key}: {count}' for key, count in phase_trial_counts.items()]))
+    if aggregate:
+        suptitle_lines.append(_join_title_parts([
+            f"mean_baseline(avg): {_format_float(aggregate['mean_baseline_mean'])}",
+            f"mean_response(avg): {_format_float(aggregate['mean_response_mean'])}",
+            f"delta_mean(avg): {_format_float(aggregate['delta_mean_mean'])}",
+            f"peak_delta(max): {_format_float(aggregate['peak_delta_hz_max'])} Hz",
+        ]))
+    fig.suptitle('\n'.join(suptitle_lines))
+    _tight_layout_figure(fig, top=0.93, reserve_right=True)
+
+    if save_dir is not None:
+        fig_filename = Path(save_dir) / f"singleUnit_psth_raster_all_events_seperated_probe{probeLetter}_clusterID_{int(cluster_id)}.png"
         fig_filename.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(fig_filename, bbox_inches='tight')
 
@@ -1581,7 +1796,7 @@ def singleUnit_psth_raster_epoch_stacked(df_units, probeLetter, cluster_id, even
     return fig, ax
 
 
-def singleUnit_psth_raster_epoch_gradient(df_units, probeLetter, cluster_id, event_times, pre, post, bin_size=0.01, event_name=None, event_meta=None, epoch_event_times_map=None, epoch_column='condition_epoch', namespace=None, smooth=True, var_bars=True, smooth_window=5, show_data_in_title=True):
+def singleUnit_psth_raster_epoch_gradient(df_units, probeLetter, cluster_id, event_times, pre, post, bin_size=0.01, event_name=None, event_meta=None, epoch_event_times_map=None, epoch_column='condition_epoch', namespace=None, smooth=True, var_bars=True, smooth_window=5, show_data_in_title=True,save_dir=None):
     if namespace is None:
         namespace = globals()
 
@@ -1697,6 +1912,12 @@ def singleUnit_psth_raster_epoch_gradient(df_units, probeLetter, cluster_id, eve
     )
     fig.suptitle('\n'.join(suptitle_lines))
     _tight_layout_figure(fig, top=0.95, reserve_right=True)
+
+    if save_dir is not None:
+        fig_filename = Path(save_dir) / f"singleUnit_psth_raster_epoch_gradient_probe{probeLetter}_clusterID_{int(cluster_id)}.png"
+        fig_filename.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(fig_filename, bbox_inches='tight')
+
     return fig, ax
 
 
@@ -1730,7 +1951,42 @@ def allUnits_psth_raster_epoch_gradient(df_units, probeLetter, brain_region, eve
         region = _unit_region(row)
         saved_paths.append(_save_figure(fig, save_dir, f'clusterID_{int(unit_id)}_probe{probeLetter}_{region}.png'))
         if save_dir is not None:
-            plt.close(fig)
+            _release_figure(fig)
+    return saved_paths
+
+
+def allUnits_psth_raster_subplots_stim_seperated(df_units, probeLetter, brain_region, event_name_subplots=None, trail_indices=None, pre=None, post=None, bin_size=0.01, event_names=None, namespace=None, smooth=True, var_bars=True, smooth_window=5, show_data_in_title=True, save_dir=None, event_times_subplots=None, label=False, KSlabel=False):
+    df1 = _select_units(
+        df_units,
+        probeLetter=probeLetter,
+        brain_region=brain_region,
+        label=label,
+        KSlabel=KSlabel,
+    )
+    saved_paths = []
+    for unit_id in _iter_unit_ids(df1):
+        fig, ax = singleUnit_psth_raster_subplots_stim_seperated(
+            df_units=df1,
+            probeLetter=probeLetter,
+            cluster_id=int(unit_id),
+            event_name_subplots=event_name_subplots,
+            trail_indices=trail_indices,
+            pre=pre,
+            post=post,
+            bin_size=bin_size,
+            event_names=event_names,
+            namespace=namespace,
+            smooth=smooth,
+            var_bars=var_bars,
+            smooth_window=smooth_window,
+            show_data_in_title=show_data_in_title,
+            event_times_subplots=event_times_subplots,
+        )
+        row = _find_unit_row(df1, unit_id)
+        region = _unit_region(row)
+        saved_paths.append(_save_figure(fig, save_dir, f'clusterID_{int(unit_id)}_probe{probeLetter}_{region}.png'))
+        if save_dir is not None:
+            _release_figure(fig)
     return saved_paths
 
 
@@ -1756,7 +2012,7 @@ def allUnits_psth_raster_2(df_units, df_stim, brain_region=None, title_name='Not
         region = _unit_region(row)
         saved_paths.append(_save_figure(fig, save_dir, f'clusterID_{int(unit_id)}_probe{probeLetter}_{region}.png'))
         if save_dir is not None:
-            plt.close(fig)
+            _release_figure(fig)
     return saved_paths
 
 
@@ -1818,7 +2074,7 @@ def psth_raster_stim_seperated(df_units, df_stim, brain_region, event_name='Not 
         _tight_layout_figure(fig, top=0.95, reserve_right=True)
         saved_paths.append(_save_figure(fig, save_dir, f'clusterID_{int(unit_id)}_probe{probeLetter}_{region}.png'))
         if save_dir is not None:
-            plt.close(fig)
+            _release_figure(fig)
     return saved_paths
 
 
@@ -1829,15 +2085,28 @@ def psth_raster_all_events_seperated(df_units, df_stim, brain_region, event_name
         raise ValueError('trail_indices is required.')
     df1 = _select_units(df_units, probeLetter=probeLetter, brain_region=brain_region, label=label, KSlabel=KSlabel, all_units=all_units)
     saved_paths = []
+    legend_handles = _grouped_overlay_legend_handles(trail_indices)
     for unit_id in _iter_unit_ids(df1):
         row = _find_unit_row(df1, unit_id)
         spike_times = np.asarray(row['spike_times'], dtype=float)
         region = _unit_region(row)
-        fig, ax = _multi_event_columns(len(variables))
+        fig, ax = _multi_event_columns(len(variables), width_per_col=8.5, fig_height=12.0)
         fig.suptitle(f'cluster_id: {int(unit_id)} | probe: {probeLetter} | region: {region}')
         for col, (event_label, event_values) in enumerate(variables.items()):
             event_times_panel = np.asarray(event_values, dtype=float)
-            max_y = _plot_grouped_overlay(ax[0, col], ax[1, col], spike_times, event_times_panel, trail_indices, abs(pre), abs(post), bin_size, var_bars=var_bars, dot_size=max(0.5, dot_size * 6))
+            max_y = _plot_grouped_overlay(
+                ax[0, col],
+                ax[1, col],
+                spike_times,
+                event_times_panel,
+                trail_indices,
+                abs(pre),
+                abs(post),
+                bin_size,
+                var_bars=var_bars,
+                dot_size=max(0.5, dot_size * 6),
+                show_legend=False,
+            )
             ax[0, col].set_title(event_label)
             ax[0, col].set_ylabel('Firing Rate [Hz]')
             ax[1, col].set_title(event_label)
@@ -1849,10 +2118,18 @@ def psth_raster_all_events_seperated(df_units, df_stim, brain_region, event_name
             ax[1, col].set_xlim(-abs(pre), abs(post))
             if max_y >= 0:
                 ax[1, col].set_ylim(-1, max_y + 1)
+        if legend_handles:
+            fig.legend(
+                handles=legend_handles,
+                loc='center left',
+                bbox_to_anchor=(0.82, 0.5),
+                frameon=False,
+                title='Trial group',
+            )
         _tight_layout_figure(fig, top=0.95, reserve_right=True)
         saved_paths.append(_save_figure(fig, save_dir, f'clusterID_{int(unit_id)}_probe{probeLetter}_{region}.png'))
         if save_dir is not None:
-            plt.close(fig)
+            _release_figure(fig)
     return saved_paths
 
 
@@ -1890,7 +2167,7 @@ def psth_raster_all_events_seperated_plus_opto(df_units, df_stim, brain_region, 
         _tight_layout_figure(fig, top=0.95, reserve_right=True)
         saved_paths.append(_save_figure(fig, save_dir, f'clusterID_{int(unit_id)}_probe{probeLetter}_{region}.png'))
         if save_dir is not None:
-            plt.close(fig)
+            _release_figure(fig)
     return saved_paths
 
 
@@ -1942,7 +2219,7 @@ def psth_raster_all_events_seperated_by_color(df_units, df_stim, brain_region, e
         _tight_layout_figure(fig, top=0.95, reserve_right=True)
         saved_paths.append(_save_figure(fig, save_dir, f'clusterID_{int(unit_id)}_probe{probeLetter}_{region}.png'))
         if save_dir is not None:
-            plt.close(fig)
+            _release_figure(fig)
     return saved_paths
 
 
@@ -2027,7 +2304,7 @@ def multiRegion_raster_figures(df_units, df_stim, brain_regions, probe_units, pr
     _tight_layout_figure(fig, top=0.95, reserve_right=False)
     saved = _save_figure(fig, save_dir, f'multi_region_raster_units_{list(probe_units)}.png')
     if save_dir is not None:
-        plt.close(fig)
+        _release_figure(fig)
     return saved
 
 
@@ -2066,7 +2343,7 @@ def _multi_region_raster_psth_common(df_units, event_times, brain_regions, probe
     _tight_layout_figure(fig, top=0.95, reserve_right=True)
     saved = _save_figure(fig, save_dir, f'multi_region_psth_raster_units_{list(probe_units)}.png')
     if save_dir is not None:
-        plt.close(fig)
+        _release_figure(fig)
     return saved
 
 
@@ -2136,7 +2413,7 @@ def probe_units_heatmap(df_units, df_stim, probeLetter, selected_units=None, pre
     fig.tight_layout()
     saved = _save_figure(fig, save_dir, f'probe_{probeLetter}_heatmap.png')
     if save_dir is not None:
-        plt.close(fig)
+        _release_figure(fig)
     return fig, ax, saved
 
 
@@ -2163,7 +2440,7 @@ def sorted_heatmap(df_units, df_stim, probeLetter, selected_units=None, pre=0.5,
     fig.tight_layout()
     saved = _save_figure(fig, save_dir, f'probe_{probeLetter}_sorted_heatmap.png')
     if save_dir is not None:
-        plt.close(fig)
+        _release_figure(fig)
     return fig, ax, saved
 
 
@@ -2197,13 +2474,16 @@ def multi_probe_units_heatmap(df_units, df_stim, probes, selected_units=None, se
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     saved = _save_figure(fig, save_dir, f'multi_probe_heatmap_{event_name or epoch1}_{abs(pre)}_{abs(post)}.png')
     if save_dir is not None:
-        plt.close(fig)
+        _release_figure(fig)
     return fig, axes, saved
 
 
-def multi_probe_units_heatmap_smoothed(df_units, df_stim, probes, selected_units=None, selected_units_by_subplot=None, times_of_events=None, event_name=None, brain_regions=None, brain_region_filters=None, pre=0.5, post=1, bin_size=0.01, epoch1='pellet_detected_timestamp', label=False, KSlabel=True, save_dir=None, max_fr=60, show_unit_labels=True, normalize_fr=False, sort_by_time=True, reset_unit_count=False, smoothing_window=1):
+def multi_probe_units_heatmap_smoothed(df_units, df_stim, probes, selected_units=None, selected_units_by_subplot=None, times_of_events=None, event_name=None, brain_regions=None, brain_region_filters=None, pre=0.5, post=1, bin_size=0.01, epoch1='pellet_detected_timestamp', label=False, KSlabel=True, save_dir=None, max_fr=60, show_unit_labels=True, normalize_fr=False, sort_by_time=True, reset_unit_count=False, smoothing_window=1,single_probe=False):
     event_times = _resolve_event_times(event_times=times_of_events, df_stim=df_stim, epoch1=epoch1)
-    fig, axes = plt.subplots(len(probes), 1, figsize=(22, max(4, len(probes) * 4.8)), squeeze=False)
+    if single_probe:
+        fig, axes = plt.subplots(len(probes), 1, figsize=(12, max(4, len(probes) * 4.8)), squeeze=False)
+    else:
+        fig, axes = plt.subplots(len(probes), 1, figsize=(12, max(4, len(probes) * 4.8)), squeeze=False)
     axes = axes.flatten()
     for idx, probeLetter in enumerate(probes):
         region_filter = None
@@ -2233,10 +2513,54 @@ def multi_probe_units_heatmap_smoothed(df_units, df_stim, probes, selected_units
         ax.set_title(f'Probe {probeLetter} | {label_text}')
     fig.suptitle(f'Aligned to {event_name or epoch1}')
     fig.tight_layout(rect=[0, 0, 1, 0.97])
-    saved = _save_figure(fig, save_dir, f'multi_probe_heatmap_smoothed_{event_name or epoch1}_{abs(pre)}_{abs(post)}.png')
+    saved = _save_figure(fig, save_dir, f'_{event_name or epoch1}_{abs(pre)}_{abs(post)}.png')
     if save_dir is not None:
-        plt.close(fig)
+        _release_figure(fig)
     return fig, axes, saved
+
+
+def multi_probe_units_heatmap_smoothed_stim_seperated(df_units, df_stim, probes, selected_units=None, selected_units_by_subplot=None, times_of_events=None, event_name=None, brain_regions=None, brain_region_filters=None, trail_indices=None, pre=0.5, post=1, bin_size=0.01, epoch1='pellet_detected_timestamp', label=False, KSlabel=True, save_dir=None, max_fr=60, show_unit_labels=True, normalize_fr=False, sort_by_time=True, reset_unit_count=False, smoothing_window=1, single_probe=False):
+    if trail_indices is None:
+        raise ValueError('trail_indices is required for baseline/stimulation/washout separation.')
+
+    event_times = _resolve_event_times(event_times=times_of_events, df_stim=df_stim, epoch1=epoch1)
+    event_label = event_name or epoch1
+    phase_map = (
+        ('baseline', 'baseline'),
+        ('optical_stim', 'stimulation'),
+        ('no_optical_stim', 'washout'),
+    )
+
+    results = {}
+    for trial_key, phase_label in phase_map:
+        phase_indices = _valid_indices(trail_indices.get(trial_key, []), len(event_times))
+        phase_event_times = event_times[phase_indices]
+        results[phase_label] = multi_probe_units_heatmap_smoothed(
+            df_units=df_units,
+            df_stim=df_stim,
+            probes=probes,
+            selected_units=selected_units,
+            selected_units_by_subplot=selected_units_by_subplot,
+            times_of_events=phase_event_times,
+            event_name=f'{event_label}_{phase_label}',
+            brain_regions=brain_regions,
+            brain_region_filters=brain_region_filters,
+            pre=pre,
+            post=post,
+            bin_size=bin_size,
+            epoch1=epoch1,
+            label=label,
+            KSlabel=KSlabel,
+            save_dir=save_dir,
+            max_fr=max_fr,
+            show_unit_labels=show_unit_labels,
+            normalize_fr=normalize_fr,
+            sort_by_time=sort_by_time,
+            reset_unit_count=reset_unit_count,
+            smoothing_window=smoothing_window,
+            single_probe=single_probe,
+        )
+    return results
 
 
 __all__ = [
@@ -2253,8 +2577,10 @@ __all__ = [
     'singleUnit_psth_raster_test',
     'singleUnit_psth_raster_subplots',
     'singleUnit_psth_raster_subplots_stim_seperated',
+    'singleUnit_psth_raster_all_events_seperated',
     'singleUnit_psth_raster_epoch_stacked',
     'singleUnit_psth_raster_epoch_gradient',
+    'allUnits_psth_raster_subplots_stim_seperated',
     'allUnits_psth_raster_epoch_gradient',
     'allUnits_psth_raster_2',
     'psth_raster_stim_seperated_baseline',
@@ -2273,6 +2599,7 @@ __all__ = [
     'sorted_heatmap',
     'multi_probe_units_heatmap',
     'multi_probe_units_heatmap_smoothed',
+    'multi_probe_units_heatmap_smoothed_stim_seperated',
 ]
 
 
