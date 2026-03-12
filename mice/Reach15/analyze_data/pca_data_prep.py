@@ -1261,6 +1261,106 @@ def map_source_events_to_pca_trials(
     return mapped, report
 
 
+def relabel_df_stim_block_labels(
+    df_stim: pd.DataFrame,
+    pca_event_meta: pd.DataFrame,
+    *,
+    time_col: str = "start_time",
+    block_label_col: str = "block_label",
+    prefer_real: bool = True,
+    preserve_original: bool = True,
+) -> pd.DataFrame:
+    """
+    Reassign df_stim block labels from trial-level PCA metadata.
+
+    The raw NWB trials/event table can contain block labels that drift when a
+    dense event stream (for example frame events) is treated row-by-row. This
+    helper maps each event time onto the nearest trial start in pca_event_meta
+    and overwrites block_label using real_condition_epoch when available.
+    """
+    if time_col not in df_stim.columns:
+        raise ValueError(f"df_stim must contain {time_col!r}.")
+    if "start_time" not in pca_event_meta.columns:
+        raise ValueError("pca_event_meta must contain 'start_time'.")
+
+    meta = pca_event_meta.copy()
+    meta["start_time"] = pd.to_numeric(meta["start_time"], errors="coerce")
+    meta = meta.dropna(subset=["start_time"]).sort_values("start_time", kind="mergesort").reset_index(drop=True)
+    if meta.empty:
+        raise ValueError("pca_event_meta has no valid trial start_time values.")
+
+    label_source_col = None
+    if bool(prefer_real) and "real_condition_epoch" in meta.columns and meta["real_condition_epoch"].notna().any():
+        label_source_col = "real_condition_epoch"
+    elif "condition_epoch" in meta.columns and meta["condition_epoch"].notna().any():
+        label_source_col = "condition_epoch"
+    else:
+        raise ValueError("pca_event_meta must contain condition_epoch or real_condition_epoch.")
+
+    out = df_stim.copy().reset_index(drop=True)
+    if bool(preserve_original) and block_label_col in out.columns and f"{block_label_col}_raw" not in out.columns:
+        out[f"{block_label_col}_raw"] = out[block_label_col]
+
+    event_time = pd.to_numeric(out[time_col], errors="coerce").to_numpy(dtype=float)
+    out["block_label_align_abs_delta_s"] = np.nan
+    out["block_label_align_method"] = pd.Series(pd.NA, index=out.index, dtype="object")
+    out["block_label_source"] = pd.Series(pd.NA, index=out.index, dtype="object")
+    out["pca_trial_start_time"] = np.nan
+    out["pca_trial_index0"] = pd.Series(pd.array([pd.NA] * len(out), dtype="Int64"))
+
+    valid = np.isfinite(event_time)
+    if not bool(valid.any()):
+        return out
+
+    trial_start = meta["start_time"].to_numpy(dtype=float)
+    x = event_time[valid]
+    right = np.searchsorted(trial_start, x, side="left")
+    left = np.clip(right - 1, 0, len(trial_start) - 1)
+    right = np.clip(right, 0, len(trial_start) - 1)
+
+    left_val = trial_start[left]
+    right_val = trial_start[right]
+    choose_right = np.abs(x - right_val) <= np.abs(x - left_val)
+    match = np.where(choose_right, right, left)
+
+    row_idx = np.flatnonzero(valid)
+    out.loc[row_idx, "pca_trial_start_time"] = trial_start[match]
+    out.loc[row_idx, "block_label_align_abs_delta_s"] = np.abs(x - trial_start[match])
+    out.loc[row_idx, "block_label_align_method"] = "nearest_trial_start"
+    out.loc[row_idx, "block_label_source"] = label_source_col
+
+    if "trial_index0" in meta.columns:
+        meta_trial_index = pd.to_numeric(meta["trial_index0"], errors="coerce").to_numpy(dtype=float)
+        mapped_trial_index = np.full(len(out), np.nan, dtype=float)
+        mapped_trial_index[row_idx] = meta_trial_index[match]
+        out["pca_trial_index0"] = pd.Series(pd.array(mapped_trial_index, dtype="Int64"))
+
+    numeric_cols = [col for col in ("epoch_id", "real_epoch_id") if col in meta.columns]
+    object_cols = [
+        col
+        for col in ("condition", "condition_epoch", "real_condition", "real_condition_epoch")
+        if col in meta.columns
+    ]
+
+    for col in numeric_cols:
+        mapped_numeric = np.full(len(out), np.nan, dtype=float)
+        meta_numeric = pd.to_numeric(meta[col], errors="coerce").to_numpy(dtype=float)
+        mapped_numeric[row_idx] = meta_numeric[match]
+        out[col] = pd.Series(pd.array(mapped_numeric, dtype="Int64"))
+
+    for col in object_cols:
+        mapped_object = np.full(len(out), pd.NA, dtype=object)
+        meta_object = meta[col].astype(object).to_numpy()
+        mapped_object[row_idx] = meta_object[match]
+        out[col] = mapped_object
+
+    mapped_block_label = np.full(len(out), pd.NA, dtype=object)
+    meta_label = meta[label_source_col].astype(object).to_numpy()
+    mapped_block_label[row_idx] = meta_label[match]
+    out[block_label_col] = mapped_block_label
+    return out
+
+
 def apply_runner_post_alignment(
     em_aligned: pd.DataFrame,
     align_to: str,
