@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 
 """Shared PSTH/raster helpers extracted from 03_psth_raster_NWB_testing.ipynb."""
 
@@ -2512,7 +2513,14 @@ def multi_probe_units_heatmap_smoothed(df_units, df_stim, probes, selected_units
         ax.set_title(f'Probe {probeLetter} | {label_text}')
     fig.suptitle(f'Aligned to {event_name or epoch1}')
     fig.tight_layout(rect=[0, 0, 1, 0.97])
-    saved = _save_figure(fig, save_dir, f'_{event_name or epoch1}_{abs(pre)}_{abs(post)}.png')
+
+    # make each plot created for specfic event type saved into a sub folder with that name
+    
+    shorted_event_name = event_name.replace('_start_times', '')
+    shorted_event_name
+    save_path = Path(save_dir) / f'{shorted_event_name}'
+    save_path.mkdir(parents=True, exist_ok=True)
+    saved = _save_figure(fig, save_path, f'_{shorted_event_name}_{abs(pre)}_{abs(post)}.png')
     if save_dir is not None:
         _release_figure(fig)
     return fig, axes, saved
