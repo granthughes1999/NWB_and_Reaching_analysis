@@ -20,9 +20,9 @@ except Exception:  # pragma: no cover - optional dependency
 
 
 DEFAULT_SPLIT_COLORS = {
-    'baseline': 'green',
-    'optical_stim': 'blue',
-    'no_optical_stim': 'red',
+    'baseline_trials': 'green',
+    'Stimulation_trials': 'blue',
+    'washout_trials': 'red',
 }
 
 DEFAULT_REGION_BACKGROUND_COLORS = [
@@ -80,7 +80,6 @@ def build_trial_index_groups(
         'washout_trials': flatten_nested_trial_numbers(washout_trials_idx) - offset,
     }
     return {key: values[values >= 0] for key, values in out.items()}
-
 
 def combine_merged_units(merged_dic):
     frames = []
@@ -1261,17 +1260,17 @@ def singleUnit_psth_raster_subplots_stim_seperated(df_units, probeLetter, cluste
     spike_times = metadata['spike_times']
 
     split_color_mapping = {
-        'baseline': 'green',
-        'optical_stim': 'blue',
-        'no_optical_stim': 'red',
+        'baseline_trials': 'green',
+        'Stimulation_trials': 'blue',
+        'washout_trials': 'red',
     }
     row_specs = [
-        ('baseline', 'Baseline PSTH'),
-        ('optical_stim', 'Stimulation PSTH'),
-        ('no_optical_stim', 'Washout PSTH'),
+        ('baseline_trials', 'Baseline PSTH'),
+        ('Stimulation_trials', 'Stimulation PSTH'),
+        ('washout_trials', 'Washout PSTH'),
     ]
     row_key_by_trial_type = {
-        'stimulation_trials': 'optical_stim',
+        'Stimulation_trials': 'optical_stim',
         'washout_trials': 'no_optical_stim',
     }
 
@@ -1423,9 +1422,9 @@ def singleUnit_psth_raster_subplots_stim_seperated(df_units, probeLetter, cluste
     if trial_type_summary:
         suptitle_lines.append(_join_title_parts(trial_type_summary))
     suptitle_lines.append(_join_title_parts([
-        f"baseline_trials: {phase_trial_counts['baseline']}",
-        f"stim_trials: {phase_trial_counts['optical_stim']}",
-        f"washout_trials: {phase_trial_counts['no_optical_stim']}",
+        f"baseline_trials: {phase_trial_counts['baseline_trials']}",
+        f"stim_trials: {phase_trial_counts['Stimulation_trials']}",
+        f"washout_trials: {phase_trial_counts['washout_trials']}",
     ]))
     if aggregate:
         suptitle_lines.append(_join_title_parts([
@@ -2526,9 +2525,9 @@ def multi_probe_units_heatmap_smoothed_stim_seperated(df_units, df_stim, probes,
     event_times = _resolve_event_times(event_times=times_of_events, df_stim=df_stim, epoch1=epoch1)
     event_label = event_name or epoch1
     phase_map = (
-        ('baseline', 'baseline'),
-        ('optical_stim', 'stimulation'),
-        ('no_optical_stim', 'washout'),
+        ('baseline_trials', 'baseline'),
+        ('Stimulation_trials', 'stimulation'),
+        ('washout_trials', 'washout'),
     )
 
     results = {}
