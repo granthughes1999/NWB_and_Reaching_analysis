@@ -75,9 +75,9 @@ def build_trial_index_groups(
 ):
     offset = 1 if one_based else 0
     out = {
-        'baseline': flatten_nested_trial_numbers(baseline_trials_idx) - offset,
-        'optical_stim': flatten_nested_trial_numbers(optoicalStim_trials_idx) - offset,
-        'no_optical_stim': flatten_nested_trial_numbers(washout_trials_idx) - offset,
+        'baseline_trials': flatten_nested_trial_numbers(baseline_trials_idx) - offset,
+        'Stimulation_trials': flatten_nested_trial_numbers(optoicalStim_trials_idx) - offset,
+        'washout_trials': flatten_nested_trial_numbers(washout_trials_idx) - offset,
     }
     return {key: values[values >= 0] for key, values in out.items()}
 
